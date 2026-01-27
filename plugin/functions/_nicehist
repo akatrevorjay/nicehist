@@ -1,0 +1,50 @@
+#compdef nicehist
+
+# Completion for nicehist command
+
+local -a commands
+commands=(
+    'search:Search command history'
+    'predict:Get predictions for prefix'
+    'delete:Delete a command from history'
+    'context:Show current context'
+    'stats:Show statistics'
+    'start:Start daemon'
+    'stop:Stop daemon'
+    'restart:Restart daemon'
+    'shutdown:Shut down daemon'
+    'import:Import zsh_history file'
+    'export:Export history in zsh_history format'
+    'bench:Benchmark RPC round-trip timing'
+    'ping:Check daemon status'
+    'debug:Toggle debug mode'
+    'help:Show help'
+)
+
+_arguments -C \
+    '1:command:->command' \
+    '*::arg:->args'
+
+case "$state" in
+    command)
+        _describe -t commands 'nicehist commands' commands
+        ;;
+    args)
+        case "$words[1]" in
+            search|s)
+                _arguments \
+                    '1:pattern:' \
+                    '2:limit:(10 20 50 100)' \
+                    '3:directory:_directories'
+                ;;
+            predict|p)
+                _arguments \
+                    '1:prefix:'
+                ;;
+            *)
+                ;;
+        esac
+        ;;
+esac
+
+# vim: ft=zsh

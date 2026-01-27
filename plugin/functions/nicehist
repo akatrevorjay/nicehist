@@ -1,0 +1,166 @@
+# nicehist CLI wrapper
+# Usage: nicehist [command] [args]
+
+local cmd="${1:-help}"
+shift 2>/dev/null
+
+case "$cmd" in
+    search|s)
+        # Search history (pass through to CLI for proper flag handling)
+        _nicehist_ensure_cli || { print "nicehist CLI binary not found" >&2; return 1; }
+        "$_NICEHIST_CLI_PATH" search "$@"
+        ;;
+
+    stats)
+        # Show statistics
+        print "nicehist statistics:"
+        print "  Socket: ${NICEHIST[SOCKET_PATH]}"
+        print "  Daemon: $(_nicehist_daemon_running && print "running" || print "not running")"
+        # Detect actual DB path (macOS vs Linux)
+        local db_path
+        if [[ "$OSTYPE" == darwin* ]]; then
+            db_path="$HOME/Library/Application Support/nicehist/history.db"
+        else
+            db_path="${XDG_DATA_HOME:-$HOME/.local/share}/nicehist/history.db"
+        fi
+        print "  DB: $db_path"
+        [[ -f "$db_path" ]] && print "  DB size: $(du -h "$db_path" | cut -f1)"
+        print "  Session: $_NICEHIST_SESSION_ID"
+        print "  Last cmd: ${_NICEHIST_LAST_CMD:-(none)}"
+        print "  Hooks initialized: $(( _NICEHIST_INITIALIZED ))"
+        print "  Widget initialized: $(( _NICEHIST_WIDGET_INITIALIZED ))"
+        ;;
+
+    start)
+        # Start daemon
+        if _nicehist_daemon_running; then
+            print "Daemon already running"
+        else
+            _nicehist_start_daemon && print "Daemon started" || print "Failed to start daemon" >&2
+        fi
+        ;;
+
+    stop)
+        # Stop daemon
+        _nicehist_stop_daemon
+        print "Daemon stopped"
+        ;;
+
+    restart)
+        # Restart daemon
+        _nicehist_stop_daemon
+        sleep 0.2
+        _nicehist_start_daemon && print "Daemon restarted" || print "Failed to restart daemon" >&2
+        ;;
+
+    shutdown)
+        # Shut down daemon via CLI
+        _nicehist_ensure_cli || { print "nicehist CLI binary not found" >&2; return 1; }
+        "$_NICEHIST_CLI_PATH" shutdown
+        print "Daemon shut down"
+        ;;
+
+    ping)
+        # Check if daemon is running
+        if _nicehist_ping; then
+            print "pong"
+        else
+            print "Daemon not responding" >&2
+            return 1
+        fi
+        ;;
+
+    context)
+        # Show current context
+        _nicehist_get_context
+        print "Directory: $PWD"
+        print "VCS: ${_NICEHIST_CONTEXT_CACHE[vcs]:-none}"
+        print "Branch: ${_NICEHIST_CONTEXT_CACHE[branch]:-none}"
+        print "Project: ${_NICEHIST_CONTEXT_CACHE[project]:-none}"
+        ;;
+
+    predict|p)
+        # Get predictions for prefix (human-readable output)
+        local prefix="$1"
+        if [[ -z "$prefix" ]]; then
+            print "Usage: nicehist predict <prefix>" >&2
+            return 1
+        fi
+
+        _nicehist_ensure_cli || { print "nicehist CLI binary not found" >&2; return 1; }
+        "$_NICEHIST_CLI_PATH" predict --prefix "$prefix"
+        ;;
+
+    import)
+        # Import history from zsh_history file
+        local histfile="${1:-${HISTFILE:-$HOME/.zsh_history}}"
+        _nicehist_ensure_cli || { print "nicehist CLI binary not found" >&2; return 1; }
+
+        if [[ ! -f "$histfile" ]]; then
+            print "History file not found: $histfile" >&2
+            return 1
+        fi
+
+        print "Importing from $histfile..."
+        "$_NICEHIST_CLI_PATH" import "$histfile"
+        ;;
+
+    export)
+        # Export history in zsh_history format
+        _nicehist_ensure_cli || { print "nicehist CLI binary not found" >&2; return 1; }
+        "$_NICEHIST_CLI_PATH" export "$@"
+        ;;
+
+    delete|del)
+        # Delete a command from history
+        local target="$1"
+        if [[ -z "$target" ]]; then
+            print "Usage: nicehist delete <command>" >&2
+            return 1
+        fi
+        _nicehist_ensure_cli || { print "nicehist CLI binary not found" >&2; return 1; }
+        "$_NICEHIST_CLI_PATH" delete --cmd "$target"
+        ;;
+
+    bench)
+        # Benchmark RPC round-trip timing
+        _nicehist_ensure_cli || { print "nicehist CLI binary not found" >&2; return 1; }
+        "$_NICEHIST_CLI_PATH" bench "$@"
+        ;;
+
+    debug)
+        # Toggle debug mode
+        if (( NICEHIST[DEBUG] )); then
+            NICEHIST[DEBUG]=0
+            print "Debug disabled"
+        else
+            NICEHIST[DEBUG]=1
+            print "Debug enabled"
+        fi
+        ;;
+
+    help|--help|-h|*)
+        print "nicehist - ZSH history with ML-based prediction"
+        print ""
+        print "Usage: nicehist <command> [args]"
+        print ""
+        print "Commands:"
+        print "  search <pattern> [--plain] [-l limit] [-d dir]  Search history"
+        print "  predict <prefix>                Get predictions"
+        print "  delete <command>                Delete a command from history"
+        print "  context                         Show current context"
+        print "  stats                           Show statistics"
+        print "  start                           Start daemon"
+        print "  stop                            Stop daemon"
+        print "  restart                         Restart daemon"
+        print "  shutdown                        Shut down daemon"
+        print "  import [file]                   Import zsh_history (default: \$HISTFILE)"
+        print "  export                          Export history in zsh_history format"
+        print "  bench                           Benchmark RPC round-trip timing"
+        print "  ping                            Check daemon status"
+        print "  debug                           Toggle debug mode"
+        print "  help                            Show this help"
+        ;;
+esac
+
+# vim: ft=zsh

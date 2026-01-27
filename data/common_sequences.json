@@ -1,0 +1,71 @@
+{
+  "description": "Common command sequences for cold-start prediction",
+  "version": 1,
+  "sequences": {
+    "git": [
+      ["git add", "git commit"],
+      ["git add -A", "git commit -m"],
+      ["git commit", "git push"],
+      ["git pull", "git status"],
+      ["git checkout", "git pull"],
+      ["git stash", "git pull"],
+      ["git stash", "git checkout"],
+      ["git fetch", "git merge"],
+      ["git fetch", "git rebase"]
+    ],
+    "npm": [
+      ["npm install", "npm start"],
+      ["npm install", "npm run dev"],
+      ["npm install", "npm test"],
+      ["npm run build", "npm run start"],
+      ["npm ci", "npm test"]
+    ],
+    "yarn": [
+      ["yarn install", "yarn start"],
+      ["yarn install", "yarn dev"],
+      ["yarn", "yarn start"],
+      ["yarn build", "yarn start"]
+    ],
+    "cargo": [
+      ["cargo build", "cargo run"],
+      ["cargo build", "cargo test"],
+      ["cargo test", "cargo build --release"],
+      ["cargo fmt", "cargo clippy"],
+      ["cargo clippy", "cargo test"]
+    ],
+    "python": [
+      ["pip install", "python"],
+      ["pip install -r requirements.txt", "python"],
+      ["pytest", "python"],
+      ["python -m venv", "source"],
+      ["source venv/bin/activate", "pip install"]
+    ],
+    "docker": [
+      ["docker build", "docker run"],
+      ["docker-compose build", "docker-compose up"],
+      ["docker-compose down", "docker-compose up"],
+      ["docker pull", "docker run"]
+    ],
+    "make": [
+      ["make clean", "make"],
+      ["make", "make install"],
+      ["make", "make test"],
+      ["./configure", "make"]
+    ],
+    "cd": [
+      ["cd", "ls"],
+      ["cd", "git status"],
+      ["cd", "code ."],
+      ["cd", "vim"]
+    ]
+  },
+  "project_defaults": {
+    "rust": ["cargo build", "cargo test", "cargo run", "cargo fmt", "cargo clippy"],
+    "node": ["npm install", "npm start", "npm test", "npm run dev", "npm run build"],
+    "python": ["python", "pip install", "pytest", "pip freeze", "python -m"],
+    "go": ["go build", "go test", "go run", "go mod tidy", "go get"],
+    "ruby": ["bundle install", "bundle exec", "rake", "rails", "rspec"],
+    "java": ["mvn clean install", "mvn test", "gradle build", "gradle test"],
+    "php": ["composer install", "php artisan", "phpunit"]
+  }
+}

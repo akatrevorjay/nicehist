@@ -1,0 +1,55 @@
+# nicehist FZF integration
+# Interactive history search with FZF
+
+emulate -L zsh
+
+# Check if fzf is available
+if ! (( $+commands[fzf] )); then
+    print "fzf not found. Please install fzf." >&2
+    return 1
+fi
+
+local selected
+local query="${BUFFER:-}"
+
+# Clear ghost text suggestion before launching fzf
+if (( ${+WIDGET} )); then
+    _nicehist_clear_suggestion
+fi
+
+# Get history: use CLI binary (fast), fall back to zsh history
+history_source() {
+    # Try Rust CLI binary for fast search
+    local cli_path="${NICEHIST[DAEMON_PATH]%-daemon}"
+    if [[ -x "$cli_path" && -S "${NICEHIST[SOCKET_PATH]}" ]]; then
+        "$cli_path" search "" --limit 50000 --plain && return
+    fi
+    # Fall back to zsh history
+    fc -ln 1
+}
+
+# Run fzf
+selected=$(
+    history_source | \
+    awk '!seen[$0]++' | \
+    fzf \
+        --height=40% \
+        --layout=reverse \
+        --query="$query" \
+        --prompt="history> " \
+        --preview-window=hidden \
+        --bind='ctrl-y:execute-silent(echo -n {} | pbcopy)+abort' \
+        --header='Enter: select, Ctrl-Y: copy to clipboard'
+)
+
+if (( ${+WIDGET} )); then
+    if [[ -n "$selected" ]]; then
+        BUFFER="$selected"
+        CURSOR=${#BUFFER}
+    fi
+    zle reset-prompt
+else
+    [[ -n "$selected" ]] && print -r -- "$selected"
+fi
+
+# vim: ft=zsh
