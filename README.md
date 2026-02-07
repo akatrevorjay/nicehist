@@ -9,6 +9,7 @@ Your shell history is one of your most valuable productivity tools, but the defa
 - **Ghost text suggestions** appear inline as you type. Hit Ctrl+E to accept.
 - **Learns command sequences**: after `git add`, it knows you usually `git commit`. After `cargo build`, it suggests `cargo test`.
 - **Directory-aware**: suggests `npm start` in your Node project, `cargo run` in your Rust project.
+- **Built-in fasd replacement**: `z` to jump to frecent directories, `zz` for interactive fzf picker, `f` for frecent files. Frecency is bootstrapped from your existing history automatically.
 - **Interactive search** with Ctrl+R via fzf integration.
 - **Fast**: <10ms predictions with sub-millisecond cache hits. A Rust daemon handles all the heavy lifting over a Unix socket so your shell never blocks.
 
@@ -61,6 +62,20 @@ nicehist import
 nicehist import /path/to/history
 ```
 
+### Migrating from fasd
+
+If you're coming from fasd, nicehist can import your frecency data:
+
+```zsh
+# Import from ~/.fasd (default)
+nicehist import-fasd
+
+# Or specify a file
+nicehist import-fasd /path/to/.fasd
+```
+
+Your `z`, `zz`, `d`, and `f` commands will work immediately -- no re-learning required.
+
 ## Configuration
 
 All settings are optional with sensible defaults. Set them in `.zshrc` **before** sourcing the plugin:
@@ -75,6 +90,7 @@ NICEHIST[AUTO_START_DAEMON]=1            # Auto-start daemon on shell init
 NICEHIST[BIND_CTRL_E]=1                  # Bind Ctrl+E to accept suggestion
 NICEHIST[BIND_RIGHT_ARROW]=0            # Bind Right Arrow to accept suggestion
 NICEHIST[FZF_BIND_CTRL_R]=1             # Bind Ctrl+R to nicehist-fzf
+NICEHIST[FRECENT_ENABLED]=1             # Enable fasd-like z/zz/d/f functions
 NICEHIST[DEBUG]=0                        # Enable debug logging
 ```
 
@@ -99,6 +115,15 @@ nicehist stats                           # Show statistics
 nicehist start / stop / restart          # Manage daemon
 nicehist ping                            # Check daemon status
 nicehist debug                           # Toggle debug mode
+
+# Frecent (fasd replacement)
+z <terms>                                # Jump to best matching directory
+zz [terms]                               # Interactive fzf directory picker
+d [terms]                                # List frecent directories with scores
+f [terms]                                # Find best matching frecent file
+nicehist frecent [terms] [-d] [-f]       # Query frecent paths
+nicehist import-fasd [file]              # Import fasd data (~/.fasd)
+nicehist export-fasd [file]              # Export frecent data in fasd format
 ```
 
 ## How It Works
@@ -144,6 +169,7 @@ ngrams_2        -- Bigram frequencies (prev_cmd -> cmd)
 ngrams_3        -- Trigram frequencies (prev2_cmd -> prev_cmd -> cmd)
 dir_command_freq -- Per-directory command frequencies
 arg_patterns    -- Argument patterns per program/subcommand
+frecent_paths   -- Frecent path tracking (fasd replacement)
 ```
 
 ## Development

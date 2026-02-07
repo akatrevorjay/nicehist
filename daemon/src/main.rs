@@ -165,6 +165,39 @@ async fn handle_request(request: Request, db: &Database, ctx_collector: &Context
                 Response::error(-32602, "Missing params".to_string())
             }
         }
+        "frecent_add" => {
+            if let Some(params) = request.params {
+                match serde_json::from_value::<protocol::FrecentAddParams>(params) {
+                    Ok(frecent_params) => {
+                        match db.frecent_add(&frecent_params) {
+                            Ok(()) => Response::success(request.id, serde_json::json!({"ok": true})),
+                            Err(e) => Response::error(-32000, format!("frecent_add failed: {}", e)),
+                        }
+                    }
+                    Err(e) => Response::error(-32602, format!("Invalid params: {}", e)),
+                }
+            } else {
+                Response::error(-32602, "Missing params".to_string())
+            }
+        }
+        "frecent_query" => {
+            if let Some(params) = request.params {
+                match serde_json::from_value::<protocol::FrecentQueryParams>(params) {
+                    Ok(query_params) => {
+                        match db.frecent_query(&query_params) {
+                            Ok(results) => Response::success(
+                                request.id,
+                                serde_json::json!({"results": results}),
+                            ),
+                            Err(e) => Response::error(-32000, format!("frecent_query failed: {}", e)),
+                        }
+                    }
+                    Err(e) => Response::error(-32602, format!("Invalid params: {}", e)),
+                }
+            } else {
+                Response::error(-32602, "Missing params".to_string())
+            }
+        }
         "ping" => Response::success(request.id, serde_json::json!({"pong": true})),
         _ => Response::error(-32601, format!("Method not found: {}", request.method)),
     }

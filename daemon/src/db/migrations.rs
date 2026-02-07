@@ -7,7 +7,7 @@ use tracing::info;
 use super::schema::SCHEMA_V1;
 
 /// Current schema version
-const CURRENT_VERSION: i32 = 2;
+const CURRENT_VERSION: i32 = 3;
 
 /// Run all pending migrations
 pub fn run_migrations(conn: &Connection) -> Result<()> {
@@ -76,6 +76,7 @@ fn set_schema_version(conn: &Connection, version: i32) -> Result<()> {
 fn apply_migration(conn: &Connection, version: i32) -> Result<()> {
     match version {
         2 => apply_migration_v2(conn),
+        3 => apply_migration_v3(conn),
         _ => Ok(()), // No migration needed
     }
 }
@@ -110,6 +111,37 @@ fn apply_migration_v2(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_arg_patterns_place ON arg_patterns(place_id);
     "#).context("Failed to apply migration v2")?;
 
+    Ok(())
+}
+
+/// Migration v3: Add frecent_paths table for fasd-like frecency tracking
+fn apply_migration_v3(conn: &Connection) -> Result<()> {
+    conn.execute_batch(r#"
+        -- Frecent paths (fasd-like frecency tracking)
+        CREATE TABLE IF NOT EXISTS frecent_paths (
+            id INTEGER PRIMARY KEY,
+            path TEXT NOT NULL,
+            path_type TEXT NOT NULL DEFAULT 'd',
+            rank REAL NOT NULL DEFAULT 1.0,
+            last_access INTEGER NOT NULL,
+            access_count INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(path, path_type)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_frecent_paths_type ON frecent_paths(path_type);
+        CREATE INDEX IF NOT EXISTS idx_frecent_paths_rank ON frecent_paths(rank DESC);
+        CREATE INDEX IF NOT EXISTS idx_frecent_paths_path ON frecent_paths(path);
+    "#).context("Failed to create frecent_paths table")?;
+
+    // Bootstrap from existing history: populate frecent directories from places table
+    conn.execute_batch(r#"
+        INSERT OR IGNORE INTO frecent_paths (path, path_type, rank, last_access, access_count)
+        SELECT p.dir, 'd', COUNT(*) * 1.0, MAX(h.start_time), COUNT(*)
+        FROM history h JOIN places p ON p.id = h.place_id
+        GROUP BY p.dir;
+    "#).context("Failed to bootstrap frecent_paths from history")?;
+
+    info!("Migration v3: created frecent_paths table and bootstrapped from history");
     Ok(())
 }
 

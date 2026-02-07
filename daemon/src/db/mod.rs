@@ -12,7 +12,8 @@ use tracing::debug;
 
 use crate::prediction::parser::{extract_learnable_args, parse_command};
 use crate::protocol::{
-    ContextInfo, PredictParams, SearchParams, SearchResult, StoreParams, Suggestion,
+    ContextInfo, FrecentAddParams, FrecentQueryParams, FrecencyResult, PredictParams, SearchParams,
+    SearchResult, StoreParams, Suggestion,
 };
 
 /// Thread-safe database handle
@@ -124,6 +125,9 @@ impl Database {
 
         // Store argument patterns
         self.store_arg_patterns(&conn, &params.cmd, Some(place_id))?;
+
+        // Extract frecent paths from command arguments
+        self.extract_frecent_paths(&conn, &params.cmd, &params.cwd)?;
 
         debug!("Stored command {} with history_id {}", params.cmd, history_id);
         Ok(history_id)
@@ -493,6 +497,229 @@ impl Database {
         Ok(id)
     }
 
+    /// Add or bump a path's frecency (fasd-like ranking)
+    pub fn frecent_add(&self, params: &FrecentAddParams) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        self.frecent_add_with_conn(&conn, &params.path, &params.path_type, params.rank, params.timestamp)
+    }
+
+    fn frecent_add_with_conn(
+        &self,
+        conn: &Connection,
+        path: &str,
+        path_type: &str,
+        rank_override: Option<f64>,
+        timestamp_override: Option<i64>,
+    ) -> Result<()> {
+        let now = timestamp_override.unwrap_or_else(chrono_lite_timestamp);
+
+        if let Some(rank) = rank_override {
+            // Import mode: use provided rank/timestamp directly
+            conn.execute(
+                "INSERT INTO frecent_paths (path, path_type, rank, last_access, access_count)
+                 VALUES (?1, ?2, ?3, ?4, 1)
+                 ON CONFLICT(path, path_type) DO UPDATE SET
+                    rank = MAX(rank, ?3),
+                    last_access = MAX(last_access, ?4),
+                    access_count = access_count + 1",
+                rusqlite::params![path, path_type, rank, now],
+            )?;
+        } else {
+            // Normal mode: fasd rank formula
+            // new_rank = old_rank + 1/old_rank (or 1.0 for new entries)
+            conn.execute(
+                "INSERT INTO frecent_paths (path, path_type, rank, last_access, access_count)
+                 VALUES (?1, ?2, 1.0, ?3, 1)
+                 ON CONFLICT(path, path_type) DO UPDATE SET
+                    rank = rank + 1.0 / MAX(rank, 0.01),
+                    last_access = ?3,
+                    access_count = access_count + 1",
+                rusqlite::params![path, path_type, now],
+            )?;
+        }
+
+        // Aging: if total rank for this path_type exceeds 2000, decay all by 0.9
+        let total_rank: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(rank), 0.0) FROM frecent_paths WHERE path_type = ?1",
+                [path_type],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+
+        if total_rank > 2000.0 {
+            conn.execute(
+                "UPDATE frecent_paths SET rank = rank * 0.9 WHERE path_type = ?1",
+                [path_type],
+            )?;
+            // Prune entries with rank < 1.0
+            conn.execute(
+                "DELETE FROM frecent_paths WHERE path_type = ?1 AND rank < 1.0",
+                [path_type],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Query frecent paths with fasd-compatible matching and scoring
+    pub fn frecent_query(&self, params: &FrecentQueryParams) -> Result<Vec<FrecencyResult>> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono_lite_timestamp();
+
+        // Fetch all candidate paths (filtered by type)
+        let query = if let Some(ref pt) = params.path_type {
+            format!(
+                "SELECT path, path_type, rank, last_access FROM frecent_paths WHERE path_type = '{}' ORDER BY rank DESC",
+                if pt == "f" { "f" } else { "d" }
+            )
+        } else {
+            "SELECT path, path_type, rank, last_access FROM frecent_paths ORDER BY rank DESC".to_string()
+        };
+
+        let mut stmt = conn.prepare(&query)?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+
+        let mut candidates: Vec<(String, String, f64, i64)> = Vec::new();
+        for row in rows {
+            if let Ok(r) = row {
+                candidates.push(r);
+            }
+        }
+
+        let raw = params.raw;
+
+        // If no search terms, return all by frecency score
+        if params.terms.is_empty() {
+            let mut results: Vec<FrecencyResult> = candidates
+                .iter()
+                .map(|(path, path_type, rank, last_access)| FrecencyResult {
+                    path: path.clone(),
+                    path_type: path_type.clone(),
+                    score: frecency_score(*rank, *last_access, now),
+                    rank: if raw { Some(*rank) } else { None },
+                    last_access: if raw { Some(*last_access) } else { None },
+                })
+                .collect();
+            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            results.truncate(params.limit);
+            return Ok(results);
+        }
+
+        // Three-tier matching
+        let mut results: Vec<FrecencyResult> = Vec::new();
+
+        // Tier 1: Ordered substring match (case-sensitive)
+        for (path, path_type, rank, last_access) in &candidates {
+            if matches_ordered_substring(path, &params.terms, false) {
+                results.push(FrecencyResult {
+                    path: path.clone(),
+                    path_type: path_type.clone(),
+                    score: frecency_score(*rank, *last_access, now),
+                    rank: if raw { Some(*rank) } else { None },
+                    last_access: if raw { Some(*last_access) } else { None },
+                });
+            }
+        }
+
+        // Tier 2: Case-insensitive ordered substring
+        if results.is_empty() {
+            for (path, path_type, rank, last_access) in &candidates {
+                if matches_ordered_substring(path, &params.terms, true) {
+                    results.push(FrecencyResult {
+                        path: path.clone(),
+                        path_type: path_type.clone(),
+                        score: frecency_score(*rank, *last_access, now),
+                        rank: if raw { Some(*rank) } else { None },
+                        last_access: if raw { Some(*last_access) } else { None },
+                    });
+                }
+            }
+        }
+
+        // Tier 3: Fuzzy match (each char of each term in order)
+        if results.is_empty() {
+            for (path, path_type, rank, last_access) in &candidates {
+                if matches_fuzzy(path, &params.terms) {
+                    results.push(FrecencyResult {
+                        path: path.clone(),
+                        path_type: path_type.clone(),
+                        score: frecency_score(*rank, *last_access, now),
+                        rank: if raw { Some(*rank) } else { None },
+                        last_access: if raw { Some(*last_access) } else { None },
+                    });
+                }
+            }
+        }
+
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(params.limit);
+        Ok(results)
+    }
+
+    /// Extract frecent paths from a command's arguments and bump their frecency
+    fn extract_frecent_paths(&self, conn: &Connection, cmd: &str, cwd: &str) -> Result<()> {
+        use std::path::PathBuf;
+
+        // Always bump the cwd as a directory
+        self.frecent_add_with_conn(conn, cwd, "d", None, None)?;
+
+        let parsed = parse_command(cmd);
+        let mut count = 0;
+
+        for arg in &parsed.args {
+            if count >= 5 {
+                break;
+            }
+
+            // Skip flags
+            if arg.starts_with('-') {
+                continue;
+            }
+
+            // Skip args that don't look like paths
+            if !arg.contains('/') && !arg.contains('.') && arg.len() > 50 {
+                continue;
+            }
+
+            // Resolve relative paths against cwd
+            let path = if arg.starts_with('/') || arg.starts_with('~') {
+                let expanded = if arg.starts_with('~') {
+                    if let Ok(home) = std::env::var("HOME") {
+                        arg.replacen('~', &home, 1)
+                    } else {
+                        continue;
+                    }
+                } else {
+                    arg.to_string()
+                };
+                PathBuf::from(expanded)
+            } else {
+                PathBuf::from(cwd).join(arg)
+            };
+
+            // Check if path exists and categorize
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let path_str = path.to_string_lossy().to_string();
+                if meta.is_dir() {
+                    self.frecent_add_with_conn(conn, &path_str, "d", None, None)?;
+                } else if meta.is_file() {
+                    self.frecent_add_with_conn(conn, &path_str, "f", None, None)?;
+                }
+                count += 1;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Get context information for a directory
     pub fn get_context(&self, cwd: &str) -> Result<ContextInfo> {
         // For now, return empty context - will be filled by context module
@@ -629,6 +856,65 @@ impl Database {
 
         Ok(results)
     }
+}
+
+/// Calculate frecency score using fasd's time-weighted formula
+fn frecency_score(rank: f64, last_access: i64, now: i64) -> f64 {
+    let age = (now - last_access).max(0) as f64;
+    let weight = if age < 3600.0 {
+        6.0 // Within 1 hour
+    } else if age < 86400.0 {
+        4.0 // Within 1 day
+    } else if age < 604800.0 {
+        2.0 // Within 1 week
+    } else {
+        1.0 // Older
+    };
+    rank * weight
+}
+
+/// Check if all terms match as ordered substrings in the path
+fn matches_ordered_substring(path: &str, terms: &[String], case_insensitive: bool) -> bool {
+    let haystack = if case_insensitive {
+        path.to_lowercase()
+    } else {
+        path.to_string()
+    };
+
+    let mut search_from = 0;
+    for term in terms {
+        let needle = if case_insensitive {
+            term.to_lowercase()
+        } else {
+            term.to_string()
+        };
+        if let Some(pos) = haystack[search_from..].find(&needle) {
+            search_from += pos + needle.len();
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// Fuzzy match: each character of each term appears in order in the path
+fn matches_fuzzy(path: &str, terms: &[String]) -> bool {
+    let path_lower = path.to_lowercase();
+    let mut path_chars = path_lower.chars().peekable();
+
+    for term in terms {
+        let term_lower = term.to_lowercase();
+        for tc in term_lower.chars() {
+            loop {
+                match path_chars.next() {
+                    Some(pc) if pc == tc => break,
+                    Some(_) => continue,
+                    None => return false,
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Get current Unix timestamp (simple implementation without chrono dependency)
@@ -771,6 +1057,122 @@ mod tests {
         let suggestions = db.predict(&predict_params).unwrap();
         assert!(!suggestions.is_empty());
         assert!(suggestions.iter().all(|s| s.cmd.starts_with("git")));
+    }
+
+    #[test]
+    fn test_frecent_add_and_query() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Add some directories
+        for _ in 0..5 {
+            db.frecent_add(&crate::protocol::FrecentAddParams {
+                path: "/home/user/project".to_string(),
+                path_type: "d".to_string(),
+                rank: None,
+                timestamp: None,
+            }).unwrap();
+        }
+
+        db.frecent_add(&crate::protocol::FrecentAddParams {
+            path: "/home/user/other".to_string(),
+            path_type: "d".to_string(),
+            rank: None,
+            timestamp: None,
+        }).unwrap();
+
+        // Query without terms should return all sorted by score
+        let results = db.frecent_query(&crate::protocol::FrecentQueryParams {
+            terms: vec![],
+            path_type: Some("d".to_string()),
+            limit: 10,
+            raw: false,
+        }).unwrap();
+
+        assert!(!results.is_empty());
+        assert_eq!(results[0].path, "/home/user/project");
+    }
+
+    #[test]
+    fn test_frecent_query_matching() {
+        let db = Database::open_in_memory().unwrap();
+
+        db.frecent_add(&crate::protocol::FrecentAddParams {
+            path: "/home/user/project/src".to_string(),
+            path_type: "d".to_string(),
+            rank: None,
+            timestamp: None,
+        }).unwrap();
+
+        db.frecent_add(&crate::protocol::FrecentAddParams {
+            path: "/home/user/other".to_string(),
+            path_type: "d".to_string(),
+            rank: None,
+            timestamp: None,
+        }).unwrap();
+
+        // Substring match
+        let results = db.frecent_query(&crate::protocol::FrecentQueryParams {
+            terms: vec!["proj".to_string(), "src".to_string()],
+            path_type: Some("d".to_string()),
+            limit: 10,
+            raw: false,
+        }).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, "/home/user/project/src");
+    }
+
+    #[test]
+    fn test_frecent_import_mode() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Import with explicit rank/timestamp
+        db.frecent_add(&crate::protocol::FrecentAddParams {
+            path: "/imported/path".to_string(),
+            path_type: "d".to_string(),
+            rank: Some(42.5),
+            timestamp: Some(1700000000),
+        }).unwrap();
+
+        let results = db.frecent_query(&crate::protocol::FrecentQueryParams {
+            terms: vec!["imported".to_string()],
+            path_type: None,
+            limit: 10,
+            raw: false,
+        }).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, "/imported/path");
+    }
+
+    #[test]
+    fn test_frecency_score_function() {
+        let now = 1700000000i64;
+
+        // Recent access (within hour) should score higher
+        let recent_score = frecency_score(10.0, now - 100, now);
+        let day_old_score = frecency_score(10.0, now - 50000, now);
+        let week_old_score = frecency_score(10.0, now - 400000, now);
+        let old_score = frecency_score(10.0, now - 1000000, now);
+
+        assert!(recent_score > day_old_score);
+        assert!(day_old_score > week_old_score);
+        assert!(week_old_score > old_score);
+    }
+
+    #[test]
+    fn test_matches_ordered_substring_fn() {
+        assert!(matches_ordered_substring("/home/user/project/src", &["proj".to_string(), "src".to_string()], false));
+        assert!(!matches_ordered_substring("/home/user/project/src", &["src".to_string(), "proj".to_string()], false));
+        // Case insensitive
+        assert!(matches_ordered_substring("/Home/User/Project", &["project".to_string()], true));
+        assert!(!matches_ordered_substring("/Home/User/Project", &["project".to_string()], false));
+    }
+
+    #[test]
+    fn test_matches_fuzzy_fn() {
+        assert!(matches_fuzzy("/home/user/project", &["prj".to_string()]));
+        assert!(!matches_fuzzy("/home/user/project", &["xyz".to_string()]));
     }
 
     #[test]

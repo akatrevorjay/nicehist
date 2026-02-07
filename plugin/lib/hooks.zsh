@@ -9,6 +9,11 @@ function _nicehist_register_hooks() {
     add-zsh-hook precmd _nicehist_precmd
     add-zsh-hook chpwd _nicehist_chpwd
 
+    # Register frecent chpwd hook if enabled
+    if (( ${NICEHIST[FRECENT_ENABLED]:-1} )); then
+        add-zsh-hook chpwd _nicehist_frecent_chpwd
+    fi
+
     # Note: zshaddhistory is handled differently as it's not in add-zsh-hook
     # We hook into it via the function
 }

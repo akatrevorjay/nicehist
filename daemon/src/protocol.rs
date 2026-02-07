@@ -183,6 +183,64 @@ pub struct SearchResult {
     pub score: Option<f64>,
 }
 
+/// Parameters for the "frecent_add" method
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrecentAddParams {
+    /// The path to add/bump
+    pub path: String,
+    /// Path type: "d" = directory, "f" = file
+    #[serde(default = "default_path_type")]
+    pub path_type: String,
+    /// Override rank (for imports)
+    #[serde(default)]
+    pub rank: Option<f64>,
+    /// Override timestamp (for imports)
+    #[serde(default)]
+    pub timestamp: Option<i64>,
+}
+
+fn default_path_type() -> String {
+    "d".to_string()
+}
+
+/// Parameters for the "frecent_query" method
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrecentQueryParams {
+    /// Search terms
+    #[serde(default)]
+    pub terms: Vec<String>,
+    /// Filter by path type: None = any, "d" = dirs, "f" = files
+    #[serde(default)]
+    pub path_type: Option<String>,
+    /// Maximum results to return
+    #[serde(default = "default_frecent_limit")]
+    pub limit: usize,
+    /// Include raw rank/last_access in results (for export)
+    #[serde(default)]
+    pub raw: bool,
+}
+
+fn default_frecent_limit() -> usize {
+    20
+}
+
+/// A frecency result entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrecencyResult {
+    /// The path
+    pub path: String,
+    /// Path type ("d" or "f")
+    pub path_type: String,
+    /// Frecency score
+    pub score: f64,
+    /// Raw rank value (for export)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rank: Option<f64>,
+    /// Last access timestamp (for export)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_access: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

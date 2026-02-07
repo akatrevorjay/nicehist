@@ -122,6 +122,37 @@ case "$cmd" in
         "$_NICEHIST_CLI_PATH" delete --cmd "$target"
         ;;
 
+    frecent|z)
+        # Query frecent paths
+        _nicehist_ensure_cli || { print "nicehist CLI binary not found" >&2; return 1; }
+        "$_NICEHIST_CLI_PATH" frecent "$@"
+        ;;
+
+    frecent-add)
+        # Bump a path's frecency
+        _nicehist_ensure_cli || { print "nicehist CLI binary not found" >&2; return 1; }
+        "$_NICEHIST_CLI_PATH" frecent-add "$@"
+        ;;
+
+    import-fasd)
+        # Import fasd data file
+        local fasd_file="${1:-$HOME/.fasd}"
+        _nicehist_ensure_cli || { print "nicehist CLI binary not found" >&2; return 1; }
+
+        if [[ ! -f "$fasd_file" ]]; then
+            print "fasd data file not found: $fasd_file" >&2
+            return 1
+        fi
+
+        "$_NICEHIST_CLI_PATH" import-fasd "$fasd_file"
+        ;;
+
+    export-fasd)
+        # Export frecent data in fasd format
+        _nicehist_ensure_cli || { print "nicehist CLI binary not found" >&2; return 1; }
+        "$_NICEHIST_CLI_PATH" export-fasd "$@"
+        ;;
+
     bench)
         # Benchmark RPC round-trip timing
         _nicehist_ensure_cli || { print "nicehist CLI binary not found" >&2; return 1; }
@@ -154,7 +185,11 @@ case "$cmd" in
         print "  stop                            Stop daemon"
         print "  restart                         Restart daemon"
         print "  shutdown                        Shut down daemon"
+        print "  frecent [terms] [-d] [-f]        Query frecent paths (fasd-like)"
+        print "  frecent-add <path> [-t d|f]      Bump a path's frecency"
         print "  import [file]                   Import zsh_history (default: \$HISTFILE)"
+        print "  import-fasd [file]              Import fasd data (default: ~/.fasd)"
+        print "  export-fasd [-o file]           Export frecent data in fasd format"
         print "  export                          Export history in zsh_history format"
         print "  bench                           Benchmark RPC round-trip timing"
         print "  ping                            Check daemon status"

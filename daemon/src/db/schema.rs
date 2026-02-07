@@ -99,6 +99,17 @@ CREATE TABLE IF NOT EXISTS arg_patterns (
     UNIQUE(program, subcommand, arg_value, place_id)
 );
 
+-- Frecent paths (fasd-like frecency tracking)
+CREATE TABLE IF NOT EXISTS frecent_paths (
+    id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL,
+    path_type TEXT NOT NULL DEFAULT 'd',  -- 'd' = directory, 'f' = file
+    rank REAL NOT NULL DEFAULT 1.0,
+    last_access INTEGER NOT NULL,
+    access_count INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(path, path_type)
+);
+
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
@@ -118,6 +129,9 @@ CREATE INDEX IF NOT EXISTS idx_parsed_commands_program ON parsed_commands(progra
 CREATE INDEX IF NOT EXISTS idx_parsed_commands_subcommand ON parsed_commands(program, subcommand);
 CREATE INDEX IF NOT EXISTS idx_arg_patterns_lookup ON arg_patterns(program, subcommand);
 CREATE INDEX IF NOT EXISTS idx_arg_patterns_place ON arg_patterns(place_id);
+CREATE INDEX IF NOT EXISTS idx_frecent_paths_type ON frecent_paths(path_type);
+CREATE INDEX IF NOT EXISTS idx_frecent_paths_rank ON frecent_paths(rank DESC);
+CREATE INDEX IF NOT EXISTS idx_frecent_paths_path ON frecent_paths(path);
 "#;
 
 #[cfg(test)]
@@ -146,6 +160,7 @@ mod tests {
         assert!(tables.contains(&"history".to_string()));
         assert!(tables.contains(&"ngrams_2".to_string()));
         assert!(tables.contains(&"ngrams_3".to_string()));
+        assert!(tables.contains(&"frecent_paths".to_string()));
     }
 
     #[test]

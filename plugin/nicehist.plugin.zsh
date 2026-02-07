@@ -25,12 +25,18 @@ fi
 : ${NICEHIST[BIND_RIGHT_ARROW]:=0}
 : ${NICEHIST[FZF_BIND_CTRL_R]:=1}
 : ${NICEHIST[DEBUG]:=0}
+: ${NICEHIST[FRECENT_ENABLED]:=1}
 
 # Load library files
 source "${NICEHIST_PLUGIN_DIR}/lib/core.zsh"
 source "${NICEHIST_PLUGIN_DIR}/lib/client.zsh"
 source "${NICEHIST_PLUGIN_DIR}/lib/hooks.zsh"
 source "${NICEHIST_PLUGIN_DIR}/lib/widget.zsh"
+
+# Load frecent (fasd-like) functions if enabled
+if (( ${NICEHIST[FRECENT_ENABLED]:-1} )); then
+    source "${NICEHIST_PLUGIN_DIR}/lib/frecent.zsh"
+fi
 
 # Add functions directory to fpath (avoid duplicates)
 if [[ -z "${fpath[(r)${NICEHIST_PLUGIN_DIR}/functions]}" ]]; then
