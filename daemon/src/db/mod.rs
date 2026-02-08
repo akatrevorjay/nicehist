@@ -455,6 +455,22 @@ impl Database {
         })?;
 
         let now = chrono_lite_timestamp();
+
+        // Cross-pollination: boost predictions in frecent directories
+        let frecent_boost = if params.frecent_boost {
+            let frecent_rank: f64 = conn
+                .query_row(
+                    "SELECT rank FROM frecent_paths WHERE path = ?1 AND path_type = 'd'",
+                    [&params.cwd],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0);
+            // Normalize: log(rank+1) / 100, capped at 0.1
+            (frecent_rank.ln_1p() / 100.0).min(0.1)
+        } else {
+            0.0
+        };
+
         for row in rows {
             if let Ok((cmd, freq, last_used, exact_dir_freq, hierarchy_score, failure_rate)) = row {
                 // Skip if already in suggestions
@@ -478,7 +494,7 @@ impl Database {
 
                 // Penalize commands that frequently fail: 100% fail → 0.5x, 50% fail → 0.75x
                 let failure_penalty = 1.0 - (failure_rate * 0.5);
-                let score = (freq_score * 0.35 + recency_score * 0.30 + dir_score).min(1.0) * failure_penalty;
+                let score = (freq_score * 0.35 + recency_score * 0.30 + dir_score + frecent_boost).min(1.0) * failure_penalty;
 
                 suggestions.push(Suggestion { cmd, score });
             }
@@ -1052,6 +1068,7 @@ mod tests {
             cwd: "/home/user/project".to_string(),
             last_cmds: vec![],
             limit: 5,
+            frecent_boost: true,
         };
 
         let suggestions = db.predict(&predict_params).unwrap();
@@ -1212,6 +1229,7 @@ mod tests {
             cwd: "/home/user/project".to_string(),
             last_cmds: vec!["git add -A".to_string()],
             limit: 5,
+            frecent_boost: true,
         };
 
         let suggestions = db.predict(&predict_params).unwrap();

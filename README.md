@@ -91,6 +91,7 @@ NICEHIST[BIND_CTRL_E]=1                  # Bind Ctrl+E to accept suggestion
 NICEHIST[BIND_RIGHT_ARROW]=0            # Bind Right Arrow to accept suggestion
 NICEHIST[FZF_BIND_CTRL_R]=1             # Bind Ctrl+R to nicehist-fzf
 NICEHIST[FRECENT_ENABLED]=1             # Enable fasd-like z/zz/d/f functions
+NICEHIST[FRECENT_BOOST]=1               # Boost predictions in frecent directories
 NICEHIST[DEBUG]=0                        # Enable debug logging
 ```
 

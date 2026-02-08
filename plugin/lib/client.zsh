@@ -49,6 +49,7 @@ function _nicehist_predict() {
     local -a argv=("$_NICEHIST_CLI_PATH" predict --prefix "$prefix" --cwd "$cwd" --limit "$limit" --plain)
     [[ -n "$_NICEHIST_LAST_CMD" ]] && argv+=(--last-cmd "$_NICEHIST_LAST_CMD")
     [[ -n "$_NICEHIST_PREV_CMD" ]] && argv+=(--prev-cmd "$_NICEHIST_PREV_CMD")
+    (( ! ${NICEHIST[FRECENT_BOOST]:-1} )) && argv+=(--no-frecent-boost)
 
     "${argv[@]}" 2>/dev/null
 }

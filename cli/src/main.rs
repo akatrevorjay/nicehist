@@ -81,6 +81,9 @@ enum Commands {
         /// Output one command per line, no scores (for widget consumption)
         #[arg(long)]
         plain: bool,
+        /// Disable frecent directory boost
+        #[arg(long)]
+        no_frecent_boost: bool,
     },
     /// Get current directory context
     Context {
@@ -581,11 +584,13 @@ fn cmd_predict(
     prev_cmd: Option<&str>,
     timeout_ms: u64,
     plain: bool,
+    frecent_boost: bool,
 ) -> Result<()> {
     let mut params = serde_json::json!({
         "prefix": prefix,
         "cwd": cwd,
         "limit": limit,
+        "frecent_boost": frecent_boost,
     });
 
     let mut last_cmds = Vec::new();
@@ -856,9 +861,10 @@ fn main() -> Result<()> {
         }
         Commands::Predict {
             prefix, cwd, limit, last_cmd, prev_cmd, timeout_ms, plain,
+            no_frecent_boost,
         } => {
             cmd_predict(&prefix, &cwd, limit, last_cmd.as_deref(),
-                        prev_cmd.as_deref(), timeout_ms, plain)?;
+                        prev_cmd.as_deref(), timeout_ms, plain, !no_frecent_boost)?;
         }
         Commands::Context { cwd } => {
             cmd_context(&cwd)?;

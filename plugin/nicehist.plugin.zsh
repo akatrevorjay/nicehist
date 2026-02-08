@@ -26,6 +26,7 @@ fi
 : ${NICEHIST[FZF_BIND_CTRL_R]:=1}
 : ${NICEHIST[DEBUG]:=0}
 : ${NICEHIST[FRECENT_ENABLED]:=1}
+: ${NICEHIST[FRECENT_BOOST]:=1}
 
 # Load library files
 source "${NICEHIST_PLUGIN_DIR}/lib/core.zsh"

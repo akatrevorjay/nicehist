@@ -97,6 +97,13 @@ pub struct PredictParams {
     /// Maximum number of suggestions to return
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// Enable frecent directory boost (cross-pollination)
+    #[serde(default = "default_true")]
+    pub frecent_boost: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_limit() -> usize {
