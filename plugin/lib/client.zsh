@@ -50,6 +50,7 @@ function _nicehist_predict() {
     [[ -n "$_NICEHIST_LAST_CMD" ]] && argv+=(--last-cmd "$_NICEHIST_LAST_CMD")
     [[ -n "$_NICEHIST_PREV_CMD" ]] && argv+=(--prev-cmd "$_NICEHIST_PREV_CMD")
     (( ! ${NICEHIST[FRECENT_BOOST]:-1} )) && argv+=(--no-frecent-boost)
+    [[ -n "${NICEHIST[RANK_WEIGHTS]:-}" ]] && argv+=(--weights "${NICEHIST[RANK_WEIGHTS]}")
 
     "${argv[@]}" 2>/dev/null
 }

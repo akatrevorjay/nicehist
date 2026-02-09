@@ -84,6 +84,49 @@ pub struct StoreParams {
     pub prev2_cmd: Option<String>,
 }
 
+/// Configurable ranking weights for prediction scoring
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RankingWeights {
+    /// Weight for command frequency score (default: 0.35)
+    #[serde(default = "default_freq_weight")]
+    pub frequency: f64,
+    /// Weight for recency score (default: 0.30)
+    #[serde(default = "default_recency_weight")]
+    pub recency: f64,
+    /// Score for exact directory match (default: 0.35)
+    #[serde(default = "default_dir_exact_weight")]
+    pub dir_exact: f64,
+    /// Weight for parent directory hierarchy match (default: 0.15)
+    #[serde(default = "default_dir_hierarchy_weight")]
+    pub dir_hierarchy: f64,
+    /// Failure penalty factor: 100% fail rate → (1 - factor)x score (default: 0.5)
+    #[serde(default = "default_failure_penalty")]
+    pub failure_penalty: f64,
+    /// Maximum frecent directory boost (default: 0.1)
+    #[serde(default = "default_frecent_boost_max")]
+    pub frecent_boost_max: f64,
+}
+
+impl Default for RankingWeights {
+    fn default() -> Self {
+        Self {
+            frequency: 0.35,
+            recency: 0.30,
+            dir_exact: 0.35,
+            dir_hierarchy: 0.15,
+            failure_penalty: 0.5,
+            frecent_boost_max: 0.1,
+        }
+    }
+}
+
+fn default_freq_weight() -> f64 { 0.35 }
+fn default_recency_weight() -> f64 { 0.30 }
+fn default_dir_exact_weight() -> f64 { 0.35 }
+fn default_dir_hierarchy_weight() -> f64 { 0.15 }
+fn default_failure_penalty() -> f64 { 0.5 }
+fn default_frecent_boost_max() -> f64 { 0.1 }
+
 /// Parameters for the "predict" method
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PredictParams {
@@ -100,6 +143,9 @@ pub struct PredictParams {
     /// Enable frecent directory boost (cross-pollination)
     #[serde(default = "default_true")]
     pub frecent_boost: bool,
+    /// Optional ranking weight overrides
+    #[serde(default)]
+    pub weights: Option<RankingWeights>,
 }
 
 fn default_true() -> bool {

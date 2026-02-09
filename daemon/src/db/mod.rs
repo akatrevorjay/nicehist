@@ -12,8 +12,8 @@ use tracing::debug;
 
 use crate::prediction::parser::{extract_learnable_args, parse_command};
 use crate::protocol::{
-    ContextInfo, FrecentAddParams, FrecentQueryParams, FrecencyResult, PredictParams, SearchParams,
-    SearchResult, StoreParams, Suggestion,
+    ContextInfo, FrecentAddParams, FrecentQueryParams, FrecencyResult, PredictParams,
+    RankingWeights, SearchParams, SearchResult, StoreParams, Suggestion,
 };
 
 /// Thread-safe database handle
@@ -455,6 +455,7 @@ impl Database {
         })?;
 
         let now = chrono_lite_timestamp();
+        let w = params.weights.clone().unwrap_or_default();
 
         // Cross-pollination: boost predictions in frecent directories
         let frecent_boost = if params.frecent_boost {
@@ -465,8 +466,8 @@ impl Database {
                     |row| row.get(0),
                 )
                 .unwrap_or(0.0);
-            // Normalize: log(rank+1) / 100, capped at 0.1
-            (frecent_rank.ln_1p() / 100.0).min(0.1)
+            // Normalize: log(rank+1) / 100, capped at configured max
+            (frecent_rank.ln_1p() / 100.0).min(w.frecent_boost_max)
         } else {
             0.0
         };
@@ -485,16 +486,16 @@ impl Database {
 
                 // Directory scoring: exact match > parent match
                 let dir_score = if exact_dir_freq > 0 {
-                    0.35
+                    w.dir_exact
                 } else if hierarchy_score > 0.0 {
-                    0.15 * hierarchy_score.min(1.0)
+                    w.dir_hierarchy * hierarchy_score.min(1.0)
                 } else {
                     0.0
                 };
 
-                // Penalize commands that frequently fail: 100% fail → 0.5x, 50% fail → 0.75x
-                let failure_penalty = 1.0 - (failure_rate * 0.5);
-                let score = (freq_score * 0.35 + recency_score * 0.30 + dir_score + frecent_boost).min(1.0) * failure_penalty;
+                // Penalize commands that frequently fail
+                let failure_penalty = 1.0 - (failure_rate * w.failure_penalty);
+                let score = (freq_score * w.frequency + recency_score * w.recency + dir_score + frecent_boost).min(1.0) * failure_penalty;
 
                 suggestions.push(Suggestion { cmd, score });
             }
@@ -1069,6 +1070,7 @@ mod tests {
             last_cmds: vec![],
             limit: 5,
             frecent_boost: true,
+            weights: None,
         };
 
         let suggestions = db.predict(&predict_params).unwrap();
@@ -1230,6 +1232,7 @@ mod tests {
             last_cmds: vec!["git add -A".to_string()],
             limit: 5,
             frecent_boost: true,
+            weights: None,
         };
 
         let suggestions = db.predict(&predict_params).unwrap();

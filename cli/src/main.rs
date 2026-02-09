@@ -84,6 +84,9 @@ enum Commands {
         /// Disable frecent directory boost
         #[arg(long)]
         no_frecent_boost: bool,
+        /// Ranking weights as JSON (e.g. '{"frequency":0.4,"recency":0.3}')
+        #[arg(long)]
+        weights: Option<String>,
     },
     /// Get current directory context
     Context {
@@ -585,6 +588,7 @@ fn cmd_predict(
     timeout_ms: u64,
     plain: bool,
     frecent_boost: bool,
+    weights_json: Option<&str>,
 ) -> Result<()> {
     let mut params = serde_json::json!({
         "prefix": prefix,
@@ -592,6 +596,12 @@ fn cmd_predict(
         "limit": limit,
         "frecent_boost": frecent_boost,
     });
+
+    if let Some(wj) = weights_json {
+        let weights: serde_json::Value = serde_json::from_str(wj)
+            .with_context(|| format!("Invalid weights JSON: {}", wj))?;
+        params["weights"] = weights;
+    }
 
     let mut last_cmds = Vec::new();
     if let Some(c) = last_cmd {
@@ -861,10 +871,11 @@ fn main() -> Result<()> {
         }
         Commands::Predict {
             prefix, cwd, limit, last_cmd, prev_cmd, timeout_ms, plain,
-            no_frecent_boost,
+            no_frecent_boost, weights,
         } => {
             cmd_predict(&prefix, &cwd, limit, last_cmd.as_deref(),
-                        prev_cmd.as_deref(), timeout_ms, plain, !no_frecent_boost)?;
+                        prev_cmd.as_deref(), timeout_ms, plain, !no_frecent_boost,
+                        weights.as_deref())?;
         }
         Commands::Context { cwd } => {
             cmd_context(&cwd)?;
