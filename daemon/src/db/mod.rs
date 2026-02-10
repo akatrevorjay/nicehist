@@ -367,11 +367,11 @@ impl Database {
     ) -> Result<Vec<Suggestion>> {
         let mut suggestions = Vec::new();
 
-        // Strategy 1: N-gram based predictions (if we have previous commands)
+        // Strategy 1: Compute n-gram bonus scores (additive, applied in strategy 2)
+        let mut ngram_bonus: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         if !params.last_cmds.is_empty() {
             let prev_cmd = &params.last_cmds[0];
             if let Ok(prev_id) = self.get_command_id(conn, prev_cmd) {
-                // Bigram predictions
                 let mut stmt = conn.prepare_cached(
                     "SELECT c.argv, n.frequency
                      FROM ngrams_2 n
@@ -390,11 +390,8 @@ impl Database {
 
                 for row in rows {
                     if let Ok((cmd, freq)) = row {
-                        let score = (freq as f64).ln().max(0.0) / 10.0; // Log scale, capped
-                        suggestions.push(Suggestion {
-                            cmd,
-                            score: score.min(1.0),
-                        });
+                        let bonus = (freq as f64).ln().max(0.0) / 10.0;
+                        ngram_bonus.insert(cmd, bonus.min(0.5));
                     }
                 }
             }
@@ -474,11 +471,6 @@ impl Database {
 
         for row in rows {
             if let Ok((cmd, freq, last_used, exact_dir_freq, hierarchy_score, failure_rate)) = row {
-                // Skip if already in suggestions
-                if suggestions.iter().any(|s| s.cmd == cmd) {
-                    continue;
-                }
-
                 // Calculate score based on frequency, recency, and directory match
                 let age_days = (now - last_used) as f64 / 86400.0;
                 let recency_score = (-age_days / 30.0).exp(); // Decay over 30 days
@@ -493,9 +485,12 @@ impl Database {
                     0.0
                 };
 
+                // N-gram bonus: commands that follow the previous command get a boost
+                let ngram_score = ngram_bonus.get(&cmd).copied().unwrap_or(0.0);
+
                 // Penalize commands that frequently fail
                 let failure_penalty = 1.0 - (failure_rate * w.failure_penalty);
-                let score = (freq_score * w.frequency + recency_score * w.recency + dir_score + frecent_boost).min(1.0) * failure_penalty;
+                let score = (freq_score * w.frequency + recency_score * w.recency + dir_score + frecent_boost + ngram_score).min(1.0) * failure_penalty;
 
                 suggestions.push(Suggestion { cmd, score });
             }
@@ -1239,5 +1234,83 @@ mod tests {
         assert!(!suggestions.is_empty());
         // git commit should be highly ranked due to n-gram
         assert!(suggestions.iter().any(|s| s.cmd.contains("commit")));
+    }
+
+    #[test]
+    fn test_ngram_ranks_successor_first() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Store "make build" followed by "make test" many times (strong bigram)
+        for i in 0..10 {
+            db.store_command(&StoreParams {
+                cmd: "make build".to_string(),
+                cwd: "/home/user/project".to_string(),
+                exit_status: Some(0),
+                duration_ms: Some(50),
+                start_time: Some(1700000000 + i * 10),
+                session_id: Some(1),
+                prev_cmd: None,
+                prev2_cmd: None,
+            }).unwrap();
+
+            db.store_command(&StoreParams {
+                cmd: "make test".to_string(),
+                cwd: "/home/user/project".to_string(),
+                exit_status: Some(0),
+                duration_ms: Some(200),
+                start_time: Some(1700000005 + i * 10),
+                session_id: Some(1),
+                prev_cmd: Some("make build".to_string()),
+                prev2_cmd: None,
+            }).unwrap();
+        }
+
+        // Also store "make clean" a few times (no bigram relationship with make build)
+        for i in 0..3 {
+            db.store_command(&StoreParams {
+                cmd: "make clean".to_string(),
+                cwd: "/home/user/project".to_string(),
+                exit_status: Some(0),
+                duration_ms: Some(30),
+                start_time: Some(1700000200 + i * 10),
+                session_id: Some(1),
+                prev_cmd: None,
+                prev2_cmd: None,
+            }).unwrap();
+        }
+
+        // Predict with "make" prefix after "make build" — n-gram should push "make test" to top
+        let suggestions = db.predict(&PredictParams {
+            prefix: "make".to_string(),
+            cwd: "/home/user/project".to_string(),
+            last_cmds: vec!["make build".to_string()],
+            limit: 5,
+            frecent_boost: false,
+            weights: None,
+        }).unwrap();
+
+        assert!(suggestions.len() >= 2, "Expected at least 2 suggestions, got {}", suggestions.len());
+        assert_eq!(suggestions[0].cmd, "make test",
+            "Expected 'make test' first due to bigram, got: {:?}", suggestions);
+
+        // Verify n-gram score is meaningful (frequency=10, ln(10)/10 = 0.23)
+        assert!(suggestions[0].score > 0.1,
+            "N-gram score too low: {}", suggestions[0].score);
+
+        // Without n-gram context, "make test" should NOT necessarily be first
+        let suggestions_no_ngram = db.predict(&PredictParams {
+            prefix: "make".to_string(),
+            cwd: "/home/user/project".to_string(),
+            last_cmds: vec![],
+            limit: 5,
+            frecent_boost: false,
+            weights: None,
+        }).unwrap();
+
+        // All three make commands should appear
+        let cmds: Vec<&str> = suggestions_no_ngram.iter().map(|s| s.cmd.as_str()).collect();
+        assert!(cmds.contains(&"make build"), "Missing 'make build' in {:?}", cmds);
+        assert!(cmds.contains(&"make test"), "Missing 'make test' in {:?}", cmds);
+        assert!(cmds.contains(&"make clean"), "Missing 'make clean' in {:?}", cmds);
     }
 }
