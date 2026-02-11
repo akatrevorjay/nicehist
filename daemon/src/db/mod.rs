@@ -368,10 +368,41 @@ impl Database {
         let mut suggestions = Vec::new();
 
         // Strategy 1: Compute n-gram bonus scores (additive, applied in strategy 2)
+        // Trigrams (prev2 → prev1 → ?) are a stronger signal than bigrams (prev1 → ?)
         let mut ngram_bonus: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         if !params.last_cmds.is_empty() {
-            let prev_cmd = &params.last_cmds[0];
-            if let Ok(prev_id) = self.get_command_id(conn, prev_cmd) {
+            let prev1_cmd = &params.last_cmds[0];
+            if let Ok(prev1_id) = self.get_command_id(conn, prev1_cmd) {
+                // Trigram lookup: if we have two previous commands
+                if params.last_cmds.len() >= 2 {
+                    let prev2_cmd = &params.last_cmds[1];
+                    if let Ok(prev2_id) = self.get_command_id(conn, prev2_cmd) {
+                        let mut stmt = conn.prepare_cached(
+                            "SELECT c.argv, n.frequency
+                             FROM ngrams_3 n
+                             JOIN commands c ON c.id = n.command_id
+                             WHERE n.prev2_command_id = ?1 AND n.prev1_command_id = ?2
+                               AND c.argv LIKE ?3 || '%'
+                             ORDER BY n.frequency DESC
+                             LIMIT ?4",
+                        )?;
+
+                        let rows = stmt.query_map(
+                            rusqlite::params![prev2_id, prev1_id, params.prefix, params.limit],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                        )?;
+
+                        for row in rows {
+                            if let Ok((cmd, freq)) = row {
+                                // Trigrams get a 1.5x multiplier over bigrams (stronger signal)
+                                let bonus = ((freq as f64).ln().max(0.0) / 10.0) * 1.5;
+                                ngram_bonus.insert(cmd, bonus.min(1.0));
+                            }
+                        }
+                    }
+                }
+
+                // Bigram lookup: prev1 → ?
                 let mut stmt = conn.prepare_cached(
                     "SELECT c.argv, n.frequency
                      FROM ngrams_2 n
@@ -382,16 +413,15 @@ impl Database {
                 )?;
 
                 let rows = stmt.query_map(
-                    rusqlite::params![prev_id, params.prefix, params.limit],
-                    |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                    },
+                    rusqlite::params![prev1_id, params.prefix, params.limit],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
                 )?;
 
                 for row in rows {
                     if let Ok((cmd, freq)) = row {
                         let bonus = (freq as f64).ln().max(0.0) / 10.0;
-                        ngram_bonus.insert(cmd, bonus.min(0.5));
+                        // Only insert if trigram didn't already provide a higher bonus
+                        ngram_bonus.entry(cmd).or_insert(bonus.min(1.0));
                     }
                 }
             }
@@ -486,7 +516,7 @@ impl Database {
                 };
 
                 // N-gram bonus: commands that follow the previous command get a boost
-                let ngram_score = ngram_bonus.get(&cmd).copied().unwrap_or(0.0);
+                let ngram_score = ngram_bonus.get(&cmd).copied().unwrap_or(0.0) * w.ngram;
 
                 // Penalize commands that frequently fail
                 let failure_penalty = 1.0 - (failure_rate * w.failure_penalty);
@@ -1297,6 +1327,12 @@ mod tests {
         assert!(suggestions[0].score > 0.1,
             "N-gram score too low: {}", suggestions[0].score);
 
+        // Verify the n-gram weight is applied
+        let ngram_cmd = &suggestions[0];
+        let non_ngram_cmd = suggestions.iter().find(|s| s.cmd != "make test").unwrap();
+        assert!(ngram_cmd.score > non_ngram_cmd.score,
+            "N-gram command should outscore non-n-gram: {} vs {}", ngram_cmd.score, non_ngram_cmd.score);
+
         // Without n-gram context, "make test" should NOT necessarily be first
         let suggestions_no_ngram = db.predict(&PredictParams {
             prefix: "make".to_string(),
@@ -1312,5 +1348,80 @@ mod tests {
         assert!(cmds.contains(&"make build"), "Missing 'make build' in {:?}", cmds);
         assert!(cmds.contains(&"make test"), "Missing 'make test' in {:?}", cmds);
         assert!(cmds.contains(&"make clean"), "Missing 'make clean' in {:?}", cmds);
+    }
+
+    #[test]
+    fn test_trigram_boosts_over_bigram() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Build a chain: git add → git commit → git push (repeated)
+        for i in 0..8 {
+            db.store_command(&StoreParams {
+                cmd: "git add -A".to_string(),
+                cwd: "/home/user/project".to_string(),
+                exit_status: Some(0), duration_ms: Some(50),
+                start_time: Some(1700000000 + i * 30),
+                session_id: Some(1),
+                prev_cmd: None, prev2_cmd: None,
+            }).unwrap();
+
+            db.store_command(&StoreParams {
+                cmd: "git commit -m 'wip'".to_string(),
+                cwd: "/home/user/project".to_string(),
+                exit_status: Some(0), duration_ms: Some(100),
+                start_time: Some(1700000010 + i * 30),
+                session_id: Some(1),
+                prev_cmd: Some("git add -A".to_string()),
+                prev2_cmd: None,
+            }).unwrap();
+
+            db.store_command(&StoreParams {
+                cmd: "git push".to_string(),
+                cwd: "/home/user/project".to_string(),
+                exit_status: Some(0), duration_ms: Some(200),
+                start_time: Some(1700000020 + i * 30),
+                session_id: Some(1),
+                prev_cmd: Some("git commit -m 'wip'".to_string()),
+                prev2_cmd: Some("git add -A".to_string()),
+            }).unwrap();
+        }
+
+        // Also store "git pull" after "git commit" a few times (bigram only, no trigram with add)
+        for i in 0..3 {
+            db.store_command(&StoreParams {
+                cmd: "git pull".to_string(),
+                cwd: "/home/user/project".to_string(),
+                exit_status: Some(0), duration_ms: Some(150),
+                start_time: Some(1700000300 + i * 10),
+                session_id: Some(1),
+                prev_cmd: Some("git commit -m 'wip'".to_string()),
+                prev2_cmd: None,
+            }).unwrap();
+        }
+
+        // With trigram context (add → commit → ?), "git push" should rank highest
+        let suggestions = db.predict(&PredictParams {
+            prefix: "git".to_string(),
+            cwd: "/home/user/project".to_string(),
+            last_cmds: vec![
+                "git commit -m 'wip'".to_string(),
+                "git add -A".to_string(),
+            ],
+            limit: 5,
+            frecent_boost: false,
+            weights: None,
+        }).unwrap();
+
+        // git push should benefit from both the trigram (add→commit→push) and bigram (commit→push)
+        let push_entry = suggestions.iter().find(|s| s.cmd == "git push");
+        assert!(push_entry.is_some(), "git push should appear in suggestions: {:?}", suggestions);
+
+        let pull_entry = suggestions.iter().find(|s| s.cmd == "git pull");
+        assert!(pull_entry.is_some(), "git pull should appear in suggestions: {:?}", suggestions);
+
+        // Trigram-backed "git push" should outscore bigram-only "git pull"
+        assert!(push_entry.unwrap().score > pull_entry.unwrap().score,
+            "Trigram-backed 'git push' ({}) should outscore bigram-only 'git pull' ({})",
+            push_entry.unwrap().score, pull_entry.unwrap().score);
     }
 }

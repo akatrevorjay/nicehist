@@ -100,13 +100,14 @@ NICEHIST[DEBUG]=0                        # Enable debug logging
 Fine-tune prediction scoring by setting `NICEHIST[RANK_WEIGHTS]` to a JSON object. Only include the weights you want to override -- unset keys use defaults:
 
 ```zsh
-NICEHIST[RANK_WEIGHTS]='{"frequency":0.35,"recency":0.30,"dir_exact":0.35,"dir_hierarchy":0.15,"failure_penalty":0.5,"frecent_boost_max":0.1}'
+NICEHIST[RANK_WEIGHTS]='{"frequency":0.35,"recency":0.30,"ngram":0.40,"dir_exact":0.35,"dir_hierarchy":0.15,"failure_penalty":0.5,"frecent_boost_max":0.1}'
 ```
 
 | Weight | Default | Description |
 |--------|---------|-------------|
 | `frequency` | 0.35 | How much command frequency matters |
 | `recency` | 0.30 | How much recent usage matters |
+| `ngram` | 0.40 | Weight for command sequence patterns (bigram/trigram) |
 | `dir_exact` | 0.35 | Bonus for commands used in the exact same directory |
 | `dir_hierarchy` | 0.15 | Bonus for commands used in parent directories |
 | `failure_penalty` | 0.50 | How much to penalize frequently-failing commands (0 = no penalty, 1 = full) |

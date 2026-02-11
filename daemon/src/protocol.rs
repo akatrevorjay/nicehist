@@ -105,6 +105,9 @@ pub struct RankingWeights {
     /// Maximum frecent directory boost (default: 0.1)
     #[serde(default = "default_frecent_boost_max")]
     pub frecent_boost_max: f64,
+    /// Weight for n-gram (bigram/trigram) sequence bonus (default: 0.40)
+    #[serde(default = "default_ngram_weight")]
+    pub ngram: f64,
 }
 
 impl Default for RankingWeights {
@@ -116,6 +119,7 @@ impl Default for RankingWeights {
             dir_hierarchy: 0.15,
             failure_penalty: 0.5,
             frecent_boost_max: 0.1,
+            ngram: 0.40,
         }
     }
 }
@@ -126,6 +130,7 @@ fn default_dir_exact_weight() -> f64 { 0.35 }
 fn default_dir_hierarchy_weight() -> f64 { 0.15 }
 fn default_failure_penalty() -> f64 { 0.5 }
 fn default_frecent_boost_max() -> f64 { 0.1 }
+fn default_ngram_weight() -> f64 { 0.40 }
 
 /// Parameters for the "predict" method
 #[derive(Debug, Clone, Serialize, Deserialize)]
