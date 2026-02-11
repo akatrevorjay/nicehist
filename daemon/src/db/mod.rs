@@ -854,12 +854,10 @@ impl Database {
             std::collections::HashMap::new()
         };
 
-        // Over-fetch from SQL so score-sorting in Rust sees a proper candidate pool.
-        // SQL orders by recency, but we re-sort by composite score (freq + recency + ngram).
-        // Without over-fetching, low-limit queries would only score-sort the N most recent
-        // commands, missing high-frequency commands that aren't the most recent.
-        let fetch_limit = params.limit.max(200);
-
+        // No SQL LIMIT — we need all matching commands to score-sort properly.
+        // GROUP BY c.id bounds results to unique commands (typically a few thousand),
+        // and the aggregates (COUNT, SUM, MAX) require scanning all rows anyway.
+        // Rust handles truncation to params.limit after score-sorting.
         let query = if params.dir.is_some() {
             "SELECT c.argv, p.dir, MAX(h.start_time) as last_used,
                     h.exit_status, h.duration,
@@ -872,9 +870,7 @@ impl Database {
              WHERE c.argv LIKE '%' || ?1 || '%'
                AND p.host = ?2
                AND p.dir = ?3
-             GROUP BY c.id
-             ORDER BY last_used DESC
-             LIMIT ?4"
+             GROUP BY c.id"
         } else {
             "SELECT c.argv, p.dir, MAX(h.start_time) as last_used,
                     h.exit_status, h.duration,
@@ -886,9 +882,7 @@ impl Database {
              JOIN places p ON p.id = h.place_id
              WHERE c.argv LIKE '%' || ?1 || '%'
                AND p.host = ?2
-             GROUP BY c.id
-             ORDER BY last_used DESC
-             LIMIT ?3"
+             GROUP BY c.id"
         };
 
         let now = chrono_lite_timestamp();
@@ -923,14 +917,14 @@ impl Database {
 
         let mut results: Vec<SearchResult> = if let Some(ref dir) = params.dir {
             stmt.query_map(
-                rusqlite::params![params.pattern, hostname, dir, fetch_limit],
+                rusqlite::params![params.pattern, hostname, dir],
                 map_row,
             )?
             .filter_map(|r| r.ok())
             .collect()
         } else {
             stmt.query_map(
-                rusqlite::params![params.pattern, hostname, fetch_limit],
+                rusqlite::params![params.pattern, hostname],
                 map_row,
             )?
             .filter_map(|r| r.ok())
