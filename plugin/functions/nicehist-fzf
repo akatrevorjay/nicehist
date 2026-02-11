@@ -41,7 +41,7 @@ selected=$(
     fzf \
         --height=40% \
         --layout=reverse \
-        --no-sort \
+        --tiebreak=index \
         --query="$query" \
         --prompt="history> " \
         --preview-window=hidden \
