@@ -3,6 +3,8 @@
 //! Uses bigram (P(cmd|prev)) and trigram (P(cmd|prev2,prev1)) probabilities
 //! with backoff smoothing.
 
+#![allow(dead_code)]
+
 use anyhow::Result;
 use rusqlite::Connection;
 

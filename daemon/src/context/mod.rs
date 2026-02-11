@@ -6,8 +6,8 @@
 mod project;
 mod vcs;
 
-pub use project::{detect_project_type, ProjectType};
-pub use vcs::{detect_vcs, VcsInfo};
+use project::detect_project_type;
+use vcs::detect_vcs;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -44,6 +44,7 @@ impl ContextCollector {
     }
 
     /// Create with custom cache TTL
+    #[allow(dead_code)]
     pub fn with_ttl(ttl: Duration) -> Self {
         Self {
             cache: Arc::new(Mutex::new(HashMap::new())),
@@ -82,6 +83,7 @@ impl ContextCollector {
     }
 
     /// Invalidate cache for a directory
+    #[allow(dead_code)]
     pub fn invalidate(&self, dir: &str) {
         let mut cache = self.cache.lock().unwrap();
         cache.remove(dir);

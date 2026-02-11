@@ -22,6 +22,7 @@ impl ParsedCommand {
     }
 
     /// Get the prefix for argument lookup (program + subcommand)
+    #[allow(dead_code)]
     pub fn arg_lookup_key(&self) -> String {
         match &self.subcommand {
             Some(sub) => format!("{} {}", self.program, sub),

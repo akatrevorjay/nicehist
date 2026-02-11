@@ -6,10 +6,6 @@ mod ngram;
 pub mod parser;
 mod ranking;
 
-pub use ngram::NgramModel;
-pub use parser::{parse_command, ParsedCommand};
-pub use ranking::ContextRanker;
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -17,16 +13,19 @@ use std::time::Instant;
 use crate::protocol::Suggestion;
 
 /// LRU cache for predictions
+#[allow(dead_code)]
 struct PredictionCache {
     entries: HashMap<String, CacheEntry>,
     max_size: usize,
 }
 
+#[allow(dead_code)]
 struct CacheEntry {
     suggestions: Vec<Suggestion>,
     timestamp: Instant,
 }
 
+#[allow(dead_code)]
 impl PredictionCache {
     fn new(max_size: usize) -> Self {
         Self {
@@ -68,6 +67,7 @@ impl PredictionCache {
 }
 
 /// Prediction engine combining n-gram model and context ranking
+#[allow(dead_code)]
 pub struct PredictionEngine {
     cache: Arc<Mutex<PredictionCache>>,
 }
@@ -78,6 +78,7 @@ impl Default for PredictionEngine {
     }
 }
 
+#[allow(dead_code)]
 impl PredictionEngine {
     pub fn new() -> Self {
         Self {

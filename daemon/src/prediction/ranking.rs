@@ -6,6 +6,8 @@
 //! - Recency decay (recent commands ranked higher)
 //! - Time-of-day patterns (optional)
 
+#![allow(dead_code)]
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Context information for ranking

@@ -13,7 +13,7 @@ use tracing::debug;
 use crate::prediction::parser::{extract_learnable_args, parse_command};
 use crate::protocol::{
     ContextInfo, FrecentAddParams, FrecentQueryParams, FrecencyResult, PredictParams,
-    RankingWeights, SearchParams, SearchResult, StoreParams, Suggestion,
+    SearchParams, SearchResult, StoreParams, Suggestion,
 };
 
 /// Thread-safe database handle
@@ -50,6 +50,7 @@ impl Database {
     }
 
     /// Open an in-memory database (for testing)
+    #[allow(dead_code)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -163,7 +164,7 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
-    fn get_or_create_context_for_dir(&self, conn: &Connection, _dir: &str) -> Result<Option<i64>> {
+    fn get_or_create_context_for_dir(&self, _conn: &Connection, _dir: &str) -> Result<Option<i64>> {
         // For now, return None - context detection will be implemented later
         // This will be filled in by the context module
         Ok(None)
@@ -763,7 +764,8 @@ impl Database {
     }
 
     /// Get context information for a directory
-    pub fn get_context(&self, cwd: &str) -> Result<ContextInfo> {
+    #[allow(dead_code)]
+    pub fn get_context(&self, _cwd: &str) -> Result<ContextInfo> {
         // For now, return empty context - will be filled by context module
         Ok(ContextInfo {
             vcs: None,
