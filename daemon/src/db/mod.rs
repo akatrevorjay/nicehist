@@ -1469,4 +1469,328 @@ mod tests {
             "Trigram-backed 'git push' ({}) should outscore bigram-only 'git pull' ({})",
             push_entry.unwrap().score, pull_entry.unwrap().score);
     }
+
+    #[test]
+    fn test_search_deduplication() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Store the same command 5 times
+        for i in 0..5 {
+            db.store_command(&StoreParams {
+                cmd: "ls -la".to_string(),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(0), duration_ms: Some(10),
+                start_time: Some(1700000000 + i * 10),
+                session_id: Some(1),
+                prev_cmd: None, prev2_cmd: None,
+            }).unwrap();
+        }
+
+        let results = db.search(&SearchParams {
+            pattern: "ls".to_string(),
+            limit: 10,
+            dir: None, exit_status: None,
+            last_cmds: vec![], cwd: None, ngram_boost: false,
+        }).unwrap();
+
+        // Should return exactly 1 result, not 5
+        assert_eq!(results.len(), 1, "Search should deduplicate: {:?}", results);
+        assert_eq!(results[0].cmd, "ls -la");
+    }
+
+    #[test]
+    fn test_search_score_ordering() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Store "rare" once and "common" many times
+        db.store_command(&StoreParams {
+            cmd: "rare-cmd".to_string(),
+            cwd: "/home/user".to_string(),
+            exit_status: Some(0), duration_ms: Some(10),
+            start_time: Some(1700000000),
+            session_id: Some(1),
+            prev_cmd: None, prev2_cmd: None,
+        }).unwrap();
+
+        for i in 0..20 {
+            db.store_command(&StoreParams {
+                cmd: "common-cmd".to_string(),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(0), duration_ms: Some(10),
+                start_time: Some(1700000000 + i),
+                session_id: Some(1),
+                prev_cmd: None, prev2_cmd: None,
+            }).unwrap();
+        }
+
+        let results = db.search(&SearchParams {
+            pattern: "cmd".to_string(),
+            limit: 10,
+            dir: None, exit_status: None,
+            last_cmds: vec![], cwd: None, ngram_boost: false,
+        }).unwrap();
+
+        assert!(results.len() >= 2);
+        // Higher-scored result should come first
+        assert!(results[0].score >= results[1].score,
+            "Results should be sorted by score: {} >= {}", results[0].score.unwrap(), results[1].score.unwrap());
+        // common-cmd should outscore rare-cmd (higher frequency)
+        assert_eq!(results[0].cmd, "common-cmd");
+    }
+
+    #[test]
+    fn test_search_ngram_boost() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Build bigram: "cargo build" → "cargo test"
+        for i in 0..10 {
+            db.store_command(&StoreParams {
+                cmd: "cargo build".to_string(),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(0), duration_ms: Some(100),
+                start_time: Some(1700000000 + i * 10),
+                session_id: Some(1),
+                prev_cmd: None, prev2_cmd: None,
+            }).unwrap();
+            db.store_command(&StoreParams {
+                cmd: "cargo test".to_string(),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(0), duration_ms: Some(200),
+                start_time: Some(1700000005 + i * 10),
+                session_id: Some(1),
+                prev_cmd: Some("cargo build".to_string()),
+                prev2_cmd: None,
+            }).unwrap();
+        }
+
+        // Store "cargo doc" with same frequency but no bigram link
+        for i in 0..10 {
+            db.store_command(&StoreParams {
+                cmd: "cargo doc".to_string(),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(0), duration_ms: Some(100),
+                start_time: Some(1700000000 + i * 10),
+                session_id: Some(1),
+                prev_cmd: None, prev2_cmd: None,
+            }).unwrap();
+        }
+
+        // Search with ngram context: last cmd was "cargo build"
+        let with_ngram = db.search(&SearchParams {
+            pattern: "cargo".to_string(),
+            limit: 10,
+            dir: None, exit_status: None,
+            last_cmds: vec!["cargo build".to_string()],
+            cwd: None, ngram_boost: true,
+        }).unwrap();
+
+        let test_entry = with_ngram.iter().find(|r| r.cmd == "cargo test").unwrap();
+        let doc_entry = with_ngram.iter().find(|r| r.cmd == "cargo doc").unwrap();
+
+        // "cargo test" should outscore "cargo doc" due to bigram bonus
+        assert!(test_entry.score > doc_entry.score,
+            "N-gram boosted 'cargo test' ({:?}) should outscore 'cargo doc' ({:?})",
+            test_entry.score, doc_entry.score);
+    }
+
+    #[test]
+    fn test_failure_penalty() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Store a command that always succeeds
+        for i in 0..10 {
+            db.store_command(&StoreParams {
+                cmd: "good-cmd".to_string(),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(0), duration_ms: Some(10),
+                start_time: Some(1700000000 + i),
+                session_id: Some(1),
+                prev_cmd: None, prev2_cmd: None,
+            }).unwrap();
+        }
+
+        // Store a command that always fails
+        for i in 0..10 {
+            db.store_command(&StoreParams {
+                cmd: "bad-cmd".to_string(),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(1), duration_ms: Some(10),
+                start_time: Some(1700000000 + i),
+                session_id: Some(1),
+                prev_cmd: None, prev2_cmd: None,
+            }).unwrap();
+        }
+
+        let results = db.predict(&PredictParams {
+            prefix: "".to_string(),
+            cwd: "/home/user".to_string(),
+            last_cmds: vec![],
+            limit: 10,
+            frecent_boost: false,
+            weights: None,
+        }).unwrap();
+
+        let good = results.iter().find(|s| s.cmd == "good-cmd");
+        let bad = results.iter().find(|s| s.cmd == "bad-cmd");
+        assert!(good.is_some() && bad.is_some(), "Both commands should appear");
+        assert!(good.unwrap().score > bad.unwrap().score,
+            "Failing command should score lower: good={} bad={}",
+            good.unwrap().score, bad.unwrap().score);
+    }
+
+    #[test]
+    fn test_delete_command() {
+        let db = Database::open_in_memory().unwrap();
+
+        db.store_command(&StoreParams {
+            cmd: "secret-cmd".to_string(),
+            cwd: "/home/user".to_string(),
+            exit_status: Some(0), duration_ms: Some(10),
+            start_time: Some(1700000000),
+            session_id: Some(1),
+            prev_cmd: None, prev2_cmd: None,
+        }).unwrap();
+
+        // Verify it exists
+        let results = db.search(&SearchParams {
+            pattern: "secret".to_string(),
+            limit: 10,
+            dir: None, exit_status: None,
+            last_cmds: vec![], cwd: None, ngram_boost: false,
+        }).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Delete it
+        let deleted = db.delete_command("secret-cmd").unwrap();
+        assert_eq!(deleted, 1);
+
+        // Verify it's gone
+        let results = db.search(&SearchParams {
+            pattern: "secret".to_string(),
+            limit: 10,
+            dir: None, exit_status: None,
+            last_cmds: vec![], cwd: None, ngram_boost: false,
+        }).unwrap();
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_custom_ranking_weights() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Store commands with different characteristics
+        for i in 0..10 {
+            db.store_command(&StoreParams {
+                cmd: "frequent-cmd".to_string(),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(0), duration_ms: Some(10),
+                start_time: Some(1700000000 + i),
+                session_id: Some(1),
+                prev_cmd: None, prev2_cmd: None,
+            }).unwrap();
+        }
+        db.store_command(&StoreParams {
+            cmd: "recent-cmd".to_string(),
+            cwd: "/home/user".to_string(),
+            exit_status: Some(0), duration_ms: Some(10),
+            start_time: None, // defaults to now
+            session_id: Some(1),
+            prev_cmd: None, prev2_cmd: None,
+        }).unwrap();
+
+        // With high frequency weight, frequent-cmd should win
+        let freq_heavy = db.predict(&PredictParams {
+            prefix: "".to_string(),
+            cwd: "/home/user".to_string(),
+            last_cmds: vec![],
+            limit: 10,
+            frecent_boost: false,
+            weights: Some(crate::protocol::RankingWeights {
+                frequency: 1.0,
+                recency: 0.0,
+                ngram: 0.0,
+                dir_exact: 0.0,
+                dir_hierarchy: 0.0,
+                failure_penalty: 0.0,
+                frecent_boost_max: 0.0,
+            }),
+        }).unwrap();
+
+        assert!(!freq_heavy.is_empty());
+        assert_eq!(freq_heavy[0].cmd, "frequent-cmd",
+            "With frequency=1.0, recency=0.0, frequent-cmd should be first: {:?}", freq_heavy);
+    }
+
+    #[test]
+    fn test_frecent_aging() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Add many paths with high ranks to trigger aging (total > 2000)
+        for i in 0..50 {
+            db.frecent_add(&FrecentAddParams {
+                path: format!("/path/{}", i),
+                path_type: "d".to_string(),
+                rank: Some(50.0), // 50 * 50 = 2500 total
+                timestamp: Some(1700000000),
+            }).unwrap();
+        }
+
+        // Add one more to trigger aging check
+        db.frecent_add(&FrecentAddParams {
+            path: "/path/trigger".to_string(),
+            path_type: "d".to_string(),
+            rank: None,
+            timestamp: None,
+        }).unwrap();
+
+        // After aging, ranks should be decayed (multiplied by 0.9)
+        let results = db.frecent_query(&FrecentQueryParams {
+            terms: vec!["path/0".to_string()],
+            path_type: Some("d".to_string()),
+            limit: 1,
+            raw: true,
+        }).unwrap();
+
+        assert!(!results.is_empty());
+        // Original rank was 50.0, after 0.9x decay should be 45.0
+        assert!(results[0].rank.unwrap() < 50.0,
+            "Rank should be decayed after aging: {}", results[0].rank.unwrap());
+    }
+
+    #[test]
+    fn test_arg_suggestions() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Store git checkout with branch args multiple times
+        for i in 0..5 {
+            db.store_command(&StoreParams {
+                cmd: "git checkout main".to_string(),
+                cwd: "/home/user/project".to_string(),
+                exit_status: Some(0), duration_ms: Some(50),
+                start_time: Some(1700000000 + i * 10),
+                session_id: Some(1),
+                prev_cmd: None, prev2_cmd: None,
+            }).unwrap();
+        }
+        for i in 0..3 {
+            db.store_command(&StoreParams {
+                cmd: "git checkout develop".to_string(),
+                cwd: "/home/user/project".to_string(),
+                exit_status: Some(0), duration_ms: Some(50),
+                start_time: Some(1700000100 + i * 10),
+                session_id: Some(1),
+                prev_cmd: None, prev2_cmd: None,
+            }).unwrap();
+        }
+
+        // Ask for arg suggestions for "git checkout "
+        let suggestions = db.get_arg_suggestions(
+            "git checkout ", "/home/user/project", 5,
+        ).unwrap();
+
+        assert!(!suggestions.is_empty(), "Should suggest branch names");
+        // All suggestions should start with "git checkout "
+        assert!(suggestions.iter().all(|s| s.cmd.starts_with("git checkout ")),
+            "All suggestions should complete the command: {:?}", suggestions);
+    }
 }
