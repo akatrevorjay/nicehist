@@ -882,7 +882,7 @@ impl Database {
             })
         };
 
-        let results: Vec<SearchResult> = if let Some(ref dir) = params.dir {
+        let mut results: Vec<SearchResult> = if let Some(ref dir) = params.dir {
             stmt.query_map(
                 rusqlite::params![params.pattern, hostname, dir, params.limit],
                 map_row,
@@ -897,6 +897,12 @@ impl Database {
             .filter_map(|r| r.ok())
             .collect()
         };
+
+        // Sort by score descending (highest relevance first)
+        results.sort_by(|a, b| {
+            b.score.unwrap_or(0.0).partial_cmp(&a.score.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(results)
     }
