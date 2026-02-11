@@ -215,6 +215,15 @@ pub struct SearchParams {
     /// Filter by exit status (optional, 0 = success only)
     #[serde(default)]
     pub exit_status: Option<i32>,
+    /// Recent commands for n-gram context scoring (most recent first)
+    #[serde(default)]
+    pub last_cmds: Vec<String>,
+    /// Current working directory for directory affinity scoring
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Enable n-gram context boost in scoring (default: false for backward compat)
+    #[serde(default)]
+    pub ngram_boost: bool,
 }
 
 fn default_search_limit() -> usize {

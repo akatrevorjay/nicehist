@@ -90,6 +90,7 @@ NICEHIST[AUTO_START_DAEMON]=1            # Auto-start daemon on shell init
 NICEHIST[BIND_CTRL_E]=1                  # Bind Ctrl+E to accept suggestion
 NICEHIST[BIND_RIGHT_ARROW]=0            # Bind Right Arrow to accept suggestion
 NICEHIST[FZF_BIND_CTRL_R]=1             # Bind Ctrl+R to nicehist-fzf
+NICEHIST[FZF_NGRAM_BOOST]=1            # Use n-gram context in Ctrl+R search
 NICEHIST[FRECENT_ENABLED]=1             # Enable fasd-like z/zz/d/f functions
 NICEHIST[FRECENT_BOOST]=1               # Boost predictions in frecent directories
 NICEHIST[DEBUG]=0                        # Enable debug logging
@@ -126,7 +127,7 @@ NICEHIST[RANK_WEIGHTS]='{"frequency":0.35,"recency":0.30,"ngram":0.40,"dir_exact
 ### Commands
 
 ```zsh
-nicehist search <pattern> [limit] [dir]  # Search history
+nicehist search <pattern> [--ngram-boost] # Search history (--ngram-boost for context-aware ranking)
 nicehist predict <prefix>                # Get predictions
 nicehist import [file]                   # Import zsh_history ($HISTFILE by default)
 nicehist context                         # Show current context

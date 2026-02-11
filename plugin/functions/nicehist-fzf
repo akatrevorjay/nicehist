@@ -22,7 +22,13 @@ history_source() {
     # Try Rust CLI binary for fast search
     local cli_path="${NICEHIST[DAEMON_PATH]%-daemon}"
     if [[ -x "$cli_path" && -S "${NICEHIST[SOCKET_PATH]}" ]]; then
-        "$cli_path" search "" --limit 50000 --plain && return
+        local -a argv=("$cli_path" search "" --limit 50000 --plain)
+        if (( ${NICEHIST[FZF_NGRAM_BOOST]:-1} )); then
+            argv+=(--ngram-boost)
+            [[ -n "$_NICEHIST_LAST_CMD" ]] && argv+=(--last-cmd "$_NICEHIST_LAST_CMD")
+            [[ -n "$_NICEHIST_PREV_CMD" ]] && argv+=(--prev-cmd "$_NICEHIST_PREV_CMD")
+        fi
+        "${argv[@]}" && return
     fi
     # Fall back to zsh history
     fc -ln 1

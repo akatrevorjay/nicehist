@@ -369,64 +369,7 @@ impl Database {
         let mut suggestions = Vec::new();
 
         // Strategy 1: Compute n-gram bonus scores (additive, applied in strategy 2)
-        // Trigrams (prev2 → prev1 → ?) are a stronger signal than bigrams (prev1 → ?)
-        let mut ngram_bonus: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-        if !params.last_cmds.is_empty() {
-            let prev1_cmd = &params.last_cmds[0];
-            if let Ok(prev1_id) = self.get_command_id(conn, prev1_cmd) {
-                // Trigram lookup: if we have two previous commands
-                if params.last_cmds.len() >= 2 {
-                    let prev2_cmd = &params.last_cmds[1];
-                    if let Ok(prev2_id) = self.get_command_id(conn, prev2_cmd) {
-                        let mut stmt = conn.prepare_cached(
-                            "SELECT c.argv, n.frequency
-                             FROM ngrams_3 n
-                             JOIN commands c ON c.id = n.command_id
-                             WHERE n.prev2_command_id = ?1 AND n.prev1_command_id = ?2
-                               AND c.argv LIKE ?3 || '%'
-                             ORDER BY n.frequency DESC
-                             LIMIT ?4",
-                        )?;
-
-                        let rows = stmt.query_map(
-                            rusqlite::params![prev2_id, prev1_id, params.prefix, params.limit],
-                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-                        )?;
-
-                        for row in rows {
-                            if let Ok((cmd, freq)) = row {
-                                // Trigrams get a 1.5x multiplier over bigrams (stronger signal)
-                                let bonus = ((freq as f64).ln().max(0.0) / 10.0) * 1.5;
-                                ngram_bonus.insert(cmd, bonus.min(1.0));
-                            }
-                        }
-                    }
-                }
-
-                // Bigram lookup: prev1 → ?
-                let mut stmt = conn.prepare_cached(
-                    "SELECT c.argv, n.frequency
-                     FROM ngrams_2 n
-                     JOIN commands c ON c.id = n.command_id
-                     WHERE n.prev_command_id = ?1 AND c.argv LIKE ?2 || '%'
-                     ORDER BY n.frequency DESC
-                     LIMIT ?3",
-                )?;
-
-                let rows = stmt.query_map(
-                    rusqlite::params![prev1_id, params.prefix, params.limit],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-                )?;
-
-                for row in rows {
-                    if let Ok((cmd, freq)) = row {
-                        let bonus = (freq as f64).ln().max(0.0) / 10.0;
-                        // Only insert if trigram didn't already provide a higher bonus
-                        ngram_bonus.entry(cmd).or_insert(bonus.min(1.0));
-                    }
-                }
-            }
-        }
+        let ngram_bonus = self.compute_ngram_bonus(conn, &params.last_cmds, &params.prefix, params.limit)?;
 
         // Strategy 2: Prefix match with recency, directory, and parent directory weighting
         // Build list of directories to check (current + ancestors)
@@ -532,6 +475,80 @@ impl Database {
         suggestions.truncate(params.limit);
 
         Ok(suggestions)
+    }
+
+    /// Compute n-gram bonus scores for commands following the given previous commands.
+    /// Returns a HashMap of command → bonus score (0.0-1.0).
+    /// Trigrams get a 1.5x multiplier over bigrams.
+    fn compute_ngram_bonus(
+        &self,
+        conn: &Connection,
+        last_cmds: &[String],
+        prefix: &str,
+        limit: usize,
+    ) -> Result<std::collections::HashMap<String, f64>> {
+        let mut ngram_bonus: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+
+        if last_cmds.is_empty() {
+            return Ok(ngram_bonus);
+        }
+
+        let prev1_cmd = &last_cmds[0];
+        if let Ok(prev1_id) = self.get_command_id(conn, prev1_cmd) {
+            // Trigram lookup: if we have two previous commands
+            if last_cmds.len() >= 2 {
+                let prev2_cmd = &last_cmds[1];
+                if let Ok(prev2_id) = self.get_command_id(conn, prev2_cmd) {
+                    let mut stmt = conn.prepare_cached(
+                        "SELECT c.argv, n.frequency
+                         FROM ngrams_3 n
+                         JOIN commands c ON c.id = n.command_id
+                         WHERE n.prev2_command_id = ?1 AND n.prev1_command_id = ?2
+                           AND c.argv LIKE ?3 || '%'
+                         ORDER BY n.frequency DESC
+                         LIMIT ?4",
+                    )?;
+
+                    let rows = stmt.query_map(
+                        rusqlite::params![prev2_id, prev1_id, prefix, limit],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                    )?;
+
+                    for row in rows {
+                        if let Ok((cmd, freq)) = row {
+                            // Trigrams get a 1.5x multiplier over bigrams (stronger signal)
+                            let bonus = ((freq as f64).ln().max(0.0) / 10.0) * 1.5;
+                            ngram_bonus.insert(cmd, bonus.min(1.0));
+                        }
+                    }
+                }
+            }
+
+            // Bigram lookup: prev1 → ?
+            let mut stmt = conn.prepare_cached(
+                "SELECT c.argv, n.frequency
+                 FROM ngrams_2 n
+                 JOIN commands c ON c.id = n.command_id
+                 WHERE n.prev_command_id = ?1 AND c.argv LIKE ?2 || '%'
+                 ORDER BY n.frequency DESC
+                 LIMIT ?3",
+            )?;
+
+            let rows = stmt.query_map(
+                rusqlite::params![prev1_id, prefix, limit],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )?;
+
+            for row in rows {
+                if let Ok((cmd, freq)) = row {
+                    let bonus = (freq as f64).ln().max(0.0) / 10.0;
+                    // Only insert if trigram didn't already provide a higher bonus
+                    ngram_bonus.entry(cmd).or_insert(bonus.min(1.0));
+                }
+            }
+        }
+
+        Ok(ngram_bonus)
     }
 
     fn get_command_id(&self, conn: &Connection, argv: &str) -> Result<i64> {
@@ -830,6 +847,13 @@ impl Database {
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
 
+        // Compute n-gram bonuses if enabled
+        let ngram_bonus = if params.ngram_boost && !params.last_cmds.is_empty() {
+            self.compute_ngram_bonus(&conn, &params.last_cmds, "", params.limit)?
+        } else {
+            std::collections::HashMap::new()
+        };
+
         let query = if params.dir.is_some() {
             "SELECT c.argv, p.dir, MAX(h.start_time) as last_used,
                     h.exit_status, h.duration,
@@ -862,9 +886,11 @@ impl Database {
         };
 
         let now = chrono_lite_timestamp();
+        let ngram_weight = 0.40; // Same default as predict
         let mut stmt = conn.prepare(query)?;
 
         let map_row = |row: &rusqlite::Row| {
+            let cmd: String = row.get(0)?;
             let timestamp: i64 = row.get(2)?;
             let exit_status: Option<i32> = row.get(3)?;
             let cmd_freq: i64 = row.get(5)?;
@@ -874,10 +900,13 @@ impl Database {
             let recency_score = (-age_days / 30.0_f64).exp();
             let freq_score = (cmd_freq as f64).ln().max(0.0) / 10.0;
             let failure_penalty = 1.0 - (failure_rate * 0.5);
-            let score = (freq_score * 0.35 + recency_score * 0.30).min(1.0) * failure_penalty;
+
+            // Apply n-gram bonus if available
+            let ngram_score = ngram_bonus.get(&cmd).copied().unwrap_or(0.0) * ngram_weight;
+            let score = (freq_score * 0.35 + recency_score * 0.30 + ngram_score).min(1.0) * failure_penalty;
 
             Ok(SearchResult {
-                cmd: row.get(0)?,
+                cmd,
                 cwd: row.get(1)?,
                 timestamp,
                 exit_status,
@@ -1036,6 +1065,9 @@ mod tests {
             limit: 10,
             dir: None,
             exit_status: None,
+            last_cmds: vec![],
+            cwd: None,
+            ngram_boost: false,
         };
 
         let results = db.search(&search_params).unwrap();

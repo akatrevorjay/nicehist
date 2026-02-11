@@ -30,6 +30,15 @@ enum Commands {
         /// Output commands only, one per line (for piping to fzf, etc.)
         #[arg(long)]
         plain: bool,
+        /// Most recent command (for n-gram context scoring)
+        #[arg(long)]
+        last_cmd: Option<String>,
+        /// Second most recent command (for trigram context scoring)
+        #[arg(long)]
+        prev_cmd: Option<String>,
+        /// Enable n-gram context boost in scoring
+        #[arg(long)]
+        ngram_boost: bool,
     },
     /// Store a command in history
     Store {
@@ -264,14 +273,35 @@ fn send_rpc_with_timeout(request: &RpcRequest, timeout: Duration) -> Result<serd
     response.result.context("No result in response")
 }
 
-fn cmd_search(pattern: &str, limit: usize, dir: Option<&str>, plain: bool) -> Result<()> {
+fn cmd_search(
+    pattern: &str,
+    limit: usize,
+    dir: Option<&str>,
+    plain: bool,
+    last_cmd: Option<&str>,
+    prev_cmd: Option<&str>,
+    ngram_boost: bool,
+) -> Result<()> {
     let mut params = serde_json::json!({
         "pattern": pattern,
         "limit": limit,
+        "ngram_boost": ngram_boost,
     });
 
     if let Some(d) = dir {
         params["dir"] = serde_json::json!(d);
+    }
+
+    // Build last_cmds array from most recent first
+    let mut last_cmds = Vec::new();
+    if let Some(cmd) = last_cmd {
+        last_cmds.push(cmd);
+    }
+    if let Some(cmd) = prev_cmd {
+        last_cmds.push(cmd);
+    }
+    if !last_cmds.is_empty() {
+        params["last_cmds"] = serde_json::json!(last_cmds);
     }
 
     let request = RpcRequest {
@@ -859,8 +889,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Search { pattern, limit, dir, plain } => {
-            cmd_search(&pattern, limit, dir.as_deref(), plain)?;
+        Commands::Search { pattern, limit, dir, plain, last_cmd, prev_cmd, ngram_boost } => {
+            cmd_search(&pattern, limit, dir.as_deref(), plain, last_cmd.as_deref(), prev_cmd.as_deref(), ngram_boost)?;
         }
         Commands::Store {
             cmd, cwd, exit_status, duration_ms, start_time,
