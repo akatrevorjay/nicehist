@@ -831,29 +831,33 @@ impl Database {
             .unwrap_or_else(|_| "unknown".to_string());
 
         let query = if params.dir.is_some() {
-            "SELECT c.argv, p.dir, h.start_time, h.exit_status, h.duration,
-                    COUNT(*) OVER (PARTITION BY h.command_id) as cmd_freq,
-                    CAST(SUM(CASE WHEN h.exit_status != 0 AND h.exit_status IS NOT NULL THEN 1 ELSE 0 END) OVER (PARTITION BY h.command_id) AS REAL)
-                        / COUNT(*) OVER (PARTITION BY h.command_id) as failure_rate
+            "SELECT c.argv, p.dir, MAX(h.start_time) as last_used,
+                    h.exit_status, h.duration,
+                    COUNT(*) as cmd_freq,
+                    CAST(SUM(CASE WHEN h.exit_status != 0 AND h.exit_status IS NOT NULL THEN 1 ELSE 0 END) AS REAL)
+                        / COUNT(*) as failure_rate
              FROM history h
              JOIN commands c ON c.id = h.command_id
              JOIN places p ON p.id = h.place_id
              WHERE c.argv LIKE '%' || ?1 || '%'
                AND p.host = ?2
                AND p.dir = ?3
-             ORDER BY h.start_time DESC
+             GROUP BY c.id
+             ORDER BY last_used DESC
              LIMIT ?4"
         } else {
-            "SELECT c.argv, p.dir, h.start_time, h.exit_status, h.duration,
-                    COUNT(*) OVER (PARTITION BY h.command_id) as cmd_freq,
-                    CAST(SUM(CASE WHEN h.exit_status != 0 AND h.exit_status IS NOT NULL THEN 1 ELSE 0 END) OVER (PARTITION BY h.command_id) AS REAL)
-                        / COUNT(*) OVER (PARTITION BY h.command_id) as failure_rate
+            "SELECT c.argv, p.dir, MAX(h.start_time) as last_used,
+                    h.exit_status, h.duration,
+                    COUNT(*) as cmd_freq,
+                    CAST(SUM(CASE WHEN h.exit_status != 0 AND h.exit_status IS NOT NULL THEN 1 ELSE 0 END) AS REAL)
+                        / COUNT(*) as failure_rate
              FROM history h
              JOIN commands c ON c.id = h.command_id
              JOIN places p ON p.id = h.place_id
              WHERE c.argv LIKE '%' || ?1 || '%'
                AND p.host = ?2
-             ORDER BY h.start_time DESC
+             GROUP BY c.id
+             ORDER BY last_used DESC
              LIMIT ?3"
         };
 
