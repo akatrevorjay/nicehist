@@ -22,9 +22,15 @@ function _nicehist_init_widget() {
     # Hook into self-insert to trigger suggestions
     zle -N self-insert _nicehist_self_insert
 
-    # Override widgets that should clear suggestions (editing)
+    # Override widgets that should clear suggestions (editing + navigation)
     local widget
-    for widget in backward-delete-char delete-char kill-line kill-word backward-kill-word; do
+    for widget in backward-delete-char delete-char kill-line kill-word backward-kill-word \
+                  up-line-or-history down-line-or-history \
+                  up-line-or-search down-line-or-search \
+                  up-line-or-beginning-search down-line-or-beginning-search \
+                  beginning-of-line end-of-line \
+                  history-beginning-search-backward history-beginning-search-forward \
+                  history-search-backward history-search-forward; do
         eval "function _nicehist_$widget() { _nicehist_clear_suggestion; zle .$widget }"
         zle -N $widget _nicehist_$widget
     done
