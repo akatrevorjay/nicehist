@@ -63,8 +63,10 @@ function _nicehist_search() {
 
     _nicehist_ensure_cli || return 1
 
-    local -a argv=("$_NICEHIST_CLI_PATH" search "$pattern" --limit "$limit" --plain)
+    local -a argv=("$_NICEHIST_CLI_PATH" search "$pattern" --limit "$limit" --plain --ngram-boost)
     [[ -n "$dir" ]] && argv+=(--dir "$dir")
+    [[ -n "$_NICEHIST_LAST_CMD" ]] && argv+=(--last-cmd "$_NICEHIST_LAST_CMD")
+    [[ -n "$_NICEHIST_PREV_CMD" ]] && argv+=(--prev-cmd "$_NICEHIST_PREV_CMD")
 
     "${argv[@]}" 2>/dev/null
 }

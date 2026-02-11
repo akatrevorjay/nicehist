@@ -6,9 +6,12 @@ shift 2>/dev/null
 
 case "$cmd" in
     search|s)
-        # Search history (pass through to CLI for proper flag handling)
+        # Search history (pass through to CLI with n-gram context)
         _nicehist_ensure_cli || { print "nicehist CLI binary not found" >&2; return 1; }
-        "$_NICEHIST_CLI_PATH" search "$@"
+        local -a _argv=("$_NICEHIST_CLI_PATH" search "$@" --ngram-boost)
+        [[ -n "$_NICEHIST_LAST_CMD" ]] && _argv+=(--last-cmd "$_NICEHIST_LAST_CMD")
+        [[ -n "$_NICEHIST_PREV_CMD" ]] && _argv+=(--prev-cmd "$_NICEHIST_PREV_CMD")
+        "${_argv[@]}"
         ;;
 
     stats)
