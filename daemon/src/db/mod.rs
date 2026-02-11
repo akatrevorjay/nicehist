@@ -854,6 +854,12 @@ impl Database {
             std::collections::HashMap::new()
         };
 
+        // Over-fetch from SQL so score-sorting in Rust sees a proper candidate pool.
+        // SQL orders by recency, but we re-sort by composite score (freq + recency + ngram).
+        // Without over-fetching, low-limit queries would only score-sort the N most recent
+        // commands, missing high-frequency commands that aren't the most recent.
+        let fetch_limit = params.limit.max(200);
+
         let query = if params.dir.is_some() {
             "SELECT c.argv, p.dir, MAX(h.start_time) as last_used,
                     h.exit_status, h.duration,
@@ -917,25 +923,26 @@ impl Database {
 
         let mut results: Vec<SearchResult> = if let Some(ref dir) = params.dir {
             stmt.query_map(
-                rusqlite::params![params.pattern, hostname, dir, params.limit],
+                rusqlite::params![params.pattern, hostname, dir, fetch_limit],
                 map_row,
             )?
             .filter_map(|r| r.ok())
             .collect()
         } else {
             stmt.query_map(
-                rusqlite::params![params.pattern, hostname, params.limit],
+                rusqlite::params![params.pattern, hostname, fetch_limit],
                 map_row,
             )?
             .filter_map(|r| r.ok())
             .collect()
         };
 
-        // Sort by score descending (highest relevance first)
+        // Sort by score descending and truncate to requested limit
         results.sort_by(|a, b| {
             b.score.unwrap_or(0.0).partial_cmp(&a.score.unwrap_or(0.0))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        results.truncate(params.limit);
 
         Ok(results)
     }
