@@ -92,10 +92,13 @@ impl Database {
             .unwrap_or_else(|| chrono_lite_timestamp());
         let time_bucket = ((start_time % 86400) / 3600) as i32;
 
+        // Detect if command references local file arguments
+        let has_local_file_args = Self::detect_local_file_args(&params.cmd, &params.cwd);
+
         // Insert history entry
         conn.execute(
-            "INSERT INTO history (session_id, command_id, place_id, context_id, start_time, duration, exit_status, time_bucket)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO history (session_id, command_id, place_id, context_id, start_time, duration, exit_status, time_bucket, has_local_file_args)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 params.session_id,
                 command_id,
@@ -105,6 +108,7 @@ impl Database {
                 params.duration_ms.map(|d| d as f64 / 1000.0),
                 params.exit_status,
                 time_bucket,
+                has_local_file_args as i32,
             ],
         )?;
 
@@ -388,7 +392,8 @@ impl Database {
             "SELECT c.argv, COUNT(*) as freq, MAX(h.start_time) as last_used,
                     SUM(CASE WHEN p.dir = ?2 THEN 1 ELSE 0 END) as exact_dir_freq,
                     {} as hierarchy_score,
-                    CAST(SUM(CASE WHEN h.exit_status != 0 AND h.exit_status IS NOT NULL THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as failure_rate
+                    CAST(SUM(CASE WHEN h.exit_status != 0 AND h.exit_status IS NOT NULL THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as failure_rate,
+                    MAX(h.has_local_file_args) as has_local_files
              FROM history h
              JOIN commands c ON c.id = h.command_id
              JOIN places p ON p.id = h.place_id
@@ -422,6 +427,7 @@ impl Database {
                 row.get::<_, i64>(3)?,
                 row.get::<_, f64>(4).unwrap_or(0.0),
                 row.get::<_, f64>(5).unwrap_or(0.0),
+                row.get::<_, i32>(6).unwrap_or(0) != 0,
             ))
         })?;
 
@@ -444,7 +450,7 @@ impl Database {
         };
 
         for row in rows {
-            if let Ok((cmd, freq, last_used, exact_dir_freq, hierarchy_score, failure_rate)) = row {
+            if let Ok((cmd, freq, last_used, exact_dir_freq, hierarchy_score, failure_rate, has_local_files)) = row {
                 // Calculate score based on frequency, recency, and directory match
                 let age_days = (now - last_used) as f64 / 86400.0;
                 let recency_score = (-age_days / 30.0).exp(); // Decay over 30 days
@@ -464,7 +470,12 @@ impl Database {
 
                 // Penalize commands that frequently fail
                 let failure_penalty = 1.0 - (failure_rate * w.failure_penalty);
-                let score = (freq_score * w.frequency + recency_score * w.recency + dir_score + frecent_boost + ngram_score).min(1.0) * failure_penalty;
+                let mut score = (freq_score * w.frequency + recency_score * w.recency + dir_score + frecent_boost + ngram_score).min(1.0) * failure_penalty;
+
+                // Penalize commands with local file args when predicting from a different directory
+                if has_local_files && exact_dir_freq == 0 {
+                    score *= 1.0 - w.local_file_penalty;
+                }
 
                 suggestions.push(Suggestion { cmd, score });
             }
@@ -724,6 +735,44 @@ impl Database {
         Ok(results)
     }
 
+    /// Detect whether a command references local (relative) file paths that exist in cwd.
+    /// Only relative paths trigger the flag — absolute/~ paths work from anywhere.
+    fn detect_local_file_args(cmd: &str, cwd: &str) -> bool {
+        use std::path::PathBuf;
+
+        let parsed = parse_command(cmd);
+        let mut checked = 0;
+
+        for arg in &parsed.args {
+            if checked >= 5 {
+                break;
+            }
+
+            // Skip flags
+            if arg.starts_with('-') {
+                continue;
+            }
+
+            // Skip absolute paths and home-relative paths (they work from anywhere)
+            if arg.starts_with('/') || arg.starts_with('~') {
+                continue;
+            }
+
+            // Skip args that don't look like paths
+            if !arg.contains('/') && !arg.contains('.') && arg.len() > 50 {
+                continue;
+            }
+
+            checked += 1;
+
+            if PathBuf::from(cwd).join(arg).exists() {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Extract frecent paths from a command's arguments and bump their frecency
     fn extract_frecent_paths(&self, conn: &Connection, cmd: &str, cwd: &str) -> Result<()> {
         use std::path::PathBuf;
@@ -848,11 +897,15 @@ impl Database {
             .unwrap_or_else(|_| "unknown".to_string());
 
         // Compute n-gram bonuses if enabled
+        let w = crate::protocol::RankingWeights::default();
         let ngram_bonus = if params.ngram_boost && !params.last_cmds.is_empty() {
             self.compute_ngram_bonus(&conn, &params.last_cmds, "", params.limit)?
         } else {
             std::collections::HashMap::new()
         };
+
+        let cwd_for_query = params.cwd.clone().unwrap_or_default();
+        let has_cwd = params.cwd.is_some();
 
         // No SQL LIMIT — we need all matching commands to score-sort properly.
         // GROUP BY c.id bounds results to unique commands (typically a few thousand),
@@ -863,7 +916,9 @@ impl Database {
                     h.exit_status, h.duration,
                     COUNT(*) as cmd_freq,
                     CAST(SUM(CASE WHEN h.exit_status != 0 AND h.exit_status IS NOT NULL THEN 1 ELSE 0 END) AS REAL)
-                        / COUNT(*) as failure_rate
+                        / COUNT(*) as failure_rate,
+                    MAX(h.has_local_file_args) as has_local_files,
+                    SUM(CASE WHEN p.dir = ?4 THEN 1 ELSE 0 END) as cwd_freq
              FROM history h
              JOIN commands c ON c.id = h.command_id
              JOIN places p ON p.id = h.place_id
@@ -876,7 +931,9 @@ impl Database {
                     h.exit_status, h.duration,
                     COUNT(*) as cmd_freq,
                     CAST(SUM(CASE WHEN h.exit_status != 0 AND h.exit_status IS NOT NULL THEN 1 ELSE 0 END) AS REAL)
-                        / COUNT(*) as failure_rate
+                        / COUNT(*) as failure_rate,
+                    MAX(h.has_local_file_args) as has_local_files,
+                    SUM(CASE WHEN p.dir = ?3 THEN 1 ELSE 0 END) as cwd_freq
              FROM history h
              JOIN commands c ON c.id = h.command_id
              JOIN places p ON p.id = h.place_id
@@ -895,15 +952,22 @@ impl Database {
             let exit_status: Option<i32> = row.get(3)?;
             let cmd_freq: i64 = row.get(5)?;
             let failure_rate: f64 = row.get::<_, f64>(6).unwrap_or(0.0);
+            let has_local_files: bool = row.get::<_, i32>(7).unwrap_or(0) != 0;
+            let cwd_freq: i64 = row.get::<_, i64>(8).unwrap_or(0);
 
             let age_days = (now - timestamp) as f64 / 86400.0;
             let recency_score = (-age_days / 30.0_f64).exp();
             let freq_score = (cmd_freq as f64).ln().max(0.0) / 10.0;
-            let failure_penalty = 1.0 - (failure_rate * 0.5);
+            let failure_penalty = 1.0 - (failure_rate * w.failure_penalty);
 
             // Apply n-gram bonus if available
             let ngram_score = ngram_bonus.get(&cmd).copied().unwrap_or(0.0) * ngram_weight;
-            let score = (freq_score * 0.35 + recency_score * 0.30 + ngram_score).min(1.0) * failure_penalty;
+            let mut score = (freq_score * w.frequency + recency_score * w.recency + ngram_score).min(1.0) * failure_penalty;
+
+            // Penalize commands with local file args when searching from a different directory
+            if has_local_files && cwd_freq == 0 && has_cwd {
+                score *= 1.0 - w.local_file_penalty;
+            }
 
             Ok(SearchResult {
                 cmd,
@@ -917,14 +981,14 @@ impl Database {
 
         let mut results: Vec<SearchResult> = if let Some(ref dir) = params.dir {
             stmt.query_map(
-                rusqlite::params![params.pattern, hostname, dir],
+                rusqlite::params![params.pattern, hostname, dir, cwd_for_query],
                 map_row,
             )?
             .filter_map(|r| r.ok())
             .collect()
         } else {
             stmt.query_map(
-                rusqlite::params![params.pattern, hostname],
+                rusqlite::params![params.pattern, hostname, cwd_for_query],
                 map_row,
             )?
             .filter_map(|r| r.ok())
@@ -1713,6 +1777,7 @@ mod tests {
                 dir_hierarchy: 0.0,
                 failure_penalty: 0.0,
                 frecent_boost_max: 0.0,
+                local_file_penalty: 0.0,
             }),
         }).unwrap();
 
@@ -1792,5 +1857,156 @@ mod tests {
         // All suggestions should start with "git checkout "
         assert!(suggestions.iter().all(|s| s.cmd.starts_with("git checkout ")),
             "All suggestions should complete the command: {:?}", suggestions);
+    }
+
+    #[test]
+    fn test_local_file_penalty_search() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Store a command with local file args from dir-a
+        db.store_command(&StoreParams {
+            cmd: "vim foo.py".to_string(),
+            cwd: "/home/user/dir-a".to_string(),
+            exit_status: Some(0), duration_ms: Some(50),
+            start_time: Some(1700000000),
+            session_id: Some(1),
+            prev_cmd: None, prev2_cmd: None,
+        }).unwrap();
+
+        // Store a generic command from dir-a
+        db.store_command(&StoreParams {
+            cmd: "vim --version".to_string(),
+            cwd: "/home/user/dir-a".to_string(),
+            exit_status: Some(0), duration_ms: Some(50),
+            start_time: Some(1700000000),
+            session_id: Some(1),
+            prev_cmd: None, prev2_cmd: None,
+        }).unwrap();
+
+        // Manually set has_local_file_args on the first command
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE history SET has_local_file_args = 1 WHERE command_id = (SELECT id FROM commands WHERE argv = 'vim foo.py')",
+                [],
+            ).unwrap();
+        }
+
+        // Search from dir-b: command with local files should be penalized
+        let results = db.search(&SearchParams {
+            pattern: "vim".to_string(),
+            limit: 10,
+            dir: None,
+            exit_status: None,
+            last_cmds: vec![],
+            cwd: Some("/home/user/dir-b".to_string()),
+            ngram_boost: false,
+        }).unwrap();
+
+        assert_eq!(results.len(), 2);
+        let local_score = results.iter().find(|r| r.cmd == "vim foo.py").unwrap().score.unwrap();
+        let generic_score = results.iter().find(|r| r.cmd == "vim --version").unwrap().score.unwrap();
+        assert!(local_score < generic_score,
+            "Local file command should score lower from different dir: {:.4} vs {:.4}", local_score, generic_score);
+    }
+
+    #[test]
+    fn test_local_file_no_penalty_same_dir() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Store a command with local file args
+        db.store_command(&StoreParams {
+            cmd: "vim foo.py".to_string(),
+            cwd: "/home/user/dir-a".to_string(),
+            exit_status: Some(0), duration_ms: Some(50),
+            start_time: Some(1700000000),
+            session_id: Some(1),
+            prev_cmd: None, prev2_cmd: None,
+        }).unwrap();
+
+        // Store same command without local files for comparison
+        db.store_command(&StoreParams {
+            cmd: "vim --version".to_string(),
+            cwd: "/home/user/dir-a".to_string(),
+            exit_status: Some(0), duration_ms: Some(50),
+            start_time: Some(1700000000),
+            session_id: Some(1),
+            prev_cmd: None, prev2_cmd: None,
+        }).unwrap();
+
+        // Set has_local_file_args
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE history SET has_local_file_args = 1 WHERE command_id = (SELECT id FROM commands WHERE argv = 'vim foo.py')",
+                [],
+            ).unwrap();
+        }
+
+        // Search from SAME dir: no penalty should apply
+        let results = db.search(&SearchParams {
+            pattern: "vim".to_string(),
+            limit: 10,
+            dir: None,
+            exit_status: None,
+            last_cmds: vec![],
+            cwd: Some("/home/user/dir-a".to_string()),
+            ngram_boost: false,
+        }).unwrap();
+
+        let local_score = results.iter().find(|r| r.cmd == "vim foo.py").unwrap().score.unwrap();
+        let generic_score = results.iter().find(|r| r.cmd == "vim --version").unwrap().score.unwrap();
+        // Same timestamps, same freq — scores should be equal (no penalty from same dir)
+        assert!((local_score - generic_score).abs() < 0.001,
+            "No penalty from same dir: {:.4} vs {:.4}", local_score, generic_score);
+    }
+
+    #[test]
+    fn test_local_file_penalty_predict() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Store commands from dir-a
+        db.store_command(&StoreParams {
+            cmd: "vim foo.py".to_string(),
+            cwd: "/home/user/dir-a".to_string(),
+            exit_status: Some(0), duration_ms: Some(50),
+            start_time: Some(1700000000),
+            session_id: Some(1),
+            prev_cmd: None, prev2_cmd: None,
+        }).unwrap();
+
+        db.store_command(&StoreParams {
+            cmd: "vim --version".to_string(),
+            cwd: "/home/user/dir-a".to_string(),
+            exit_status: Some(0), duration_ms: Some(50),
+            start_time: Some(1700000000),
+            session_id: Some(1),
+            prev_cmd: None, prev2_cmd: None,
+        }).unwrap();
+
+        // Set has_local_file_args
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE history SET has_local_file_args = 1 WHERE command_id = (SELECT id FROM commands WHERE argv = 'vim foo.py')",
+                [],
+            ).unwrap();
+        }
+
+        // Predict from dir-b: command with local files should be penalized
+        let suggestions = db.predict(&PredictParams {
+            prefix: "vim".to_string(),
+            cwd: "/home/user/dir-b".to_string(),
+            last_cmds: vec![],
+            limit: 10,
+            frecent_boost: false,
+            weights: None,
+        }).unwrap();
+
+        assert!(suggestions.len() >= 2);
+        let local_score = suggestions.iter().find(|s| s.cmd == "vim foo.py").unwrap().score;
+        let generic_score = suggestions.iter().find(|s| s.cmd == "vim --version").unwrap().score;
+        assert!(local_score < generic_score,
+            "Local file command should score lower in predict from different dir: {:.4} vs {:.4}", local_score, generic_score);
     }
 }

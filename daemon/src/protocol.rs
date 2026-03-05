@@ -108,6 +108,9 @@ pub struct RankingWeights {
     /// Weight for n-gram (bigram/trigram) sequence bonus (default: 0.40)
     #[serde(default = "default_ngram_weight")]
     pub ngram: f64,
+    /// Penalty factor for commands with local file args when searching from different dir (default: 0.3)
+    #[serde(default = "default_local_file_penalty")]
+    pub local_file_penalty: f64,
 }
 
 impl Default for RankingWeights {
@@ -120,6 +123,7 @@ impl Default for RankingWeights {
             failure_penalty: 0.5,
             frecent_boost_max: 0.1,
             ngram: 0.40,
+            local_file_penalty: 0.3,
         }
     }
 }
@@ -131,6 +135,7 @@ fn default_dir_hierarchy_weight() -> f64 { 0.15 }
 fn default_failure_penalty() -> f64 { 0.5 }
 fn default_frecent_boost_max() -> f64 { 0.1 }
 fn default_ngram_weight() -> f64 { 0.40 }
+fn default_local_file_penalty() -> f64 { 0.3 }
 
 /// Parameters for the "predict" method
 #[derive(Debug, Clone, Serialize, Deserialize)]

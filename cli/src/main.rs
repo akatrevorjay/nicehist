@@ -39,6 +39,9 @@ enum Commands {
         /// Enable n-gram context boost in scoring
         #[arg(long)]
         ngram_boost: bool,
+        /// Current working directory (for local file penalty scoring)
+        #[arg(long, default_value_t = default_cwd())]
+        cwd: String,
     },
     /// Store a command in history
     Store {
@@ -281,6 +284,7 @@ fn cmd_search(
     last_cmd: Option<&str>,
     prev_cmd: Option<&str>,
     ngram_boost: bool,
+    cwd: &str,
 ) -> Result<()> {
     let mut params = serde_json::json!({
         "pattern": pattern,
@@ -302,6 +306,10 @@ fn cmd_search(
     }
     if !last_cmds.is_empty() {
         params["last_cmds"] = serde_json::json!(last_cmds);
+    }
+
+    if !cwd.is_empty() {
+        params["cwd"] = serde_json::json!(cwd);
     }
 
     let request = RpcRequest {
@@ -889,8 +897,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Search { pattern, limit, dir, plain, last_cmd, prev_cmd, ngram_boost } => {
-            cmd_search(&pattern, limit, dir.as_deref(), plain, last_cmd.as_deref(), prev_cmd.as_deref(), ngram_boost)?;
+        Commands::Search { pattern, limit, dir, plain, last_cmd, prev_cmd, ngram_boost, cwd } => {
+            cmd_search(&pattern, limit, dir.as_deref(), plain, last_cmd.as_deref(), prev_cmd.as_deref(), ngram_boost, &cwd)?;
         }
         Commands::Store {
             cmd, cwd, exit_status, duration_ms, start_time,

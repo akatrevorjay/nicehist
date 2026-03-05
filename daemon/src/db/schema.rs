@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS history (
     start_time INTEGER NOT NULL,
     duration REAL,           -- Duration in seconds (float for sub-second precision)
     exit_status INTEGER,
-    time_bucket INTEGER      -- Hour of day (0-23) for time-of-day patterns
+    time_bucket INTEGER,     -- Hour of day (0-23) for time-of-day patterns
+    has_local_file_args INTEGER NOT NULL DEFAULT 0  -- Command references local files (relative paths that exist)
 );
 
 -- N-gram tables for prediction

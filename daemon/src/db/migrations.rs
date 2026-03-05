@@ -7,7 +7,7 @@ use tracing::info;
 use super::schema::SCHEMA_V1;
 
 /// Current schema version
-const CURRENT_VERSION: i32 = 3;
+const CURRENT_VERSION: i32 = 5;
 
 /// Run all pending migrations
 pub fn run_migrations(conn: &Connection) -> Result<()> {
@@ -77,6 +77,8 @@ fn apply_migration(conn: &Connection, version: i32) -> Result<()> {
     match version {
         2 => apply_migration_v2(conn),
         3 => apply_migration_v3(conn),
+        4 => apply_migration_v4(conn),
+        5 => apply_migration_v5(conn),
         _ => Ok(()), // No migration needed
     }
 }
@@ -142,6 +144,37 @@ fn apply_migration_v3(conn: &Connection) -> Result<()> {
     "#).context("Failed to bootstrap frecent_paths from history")?;
 
     info!("Migration v3: created frecent_paths table and bootstrapped from history");
+    Ok(())
+}
+
+/// Migration v4: Add exit-aware bigram table for exit-status-aware n-grams
+fn apply_migration_v4(conn: &Connection) -> Result<()> {
+    conn.execute_batch(r#"
+        -- Exit-aware bigram: P(command | prev_command, prev_exit_ok)
+        CREATE TABLE IF NOT EXISTS ngrams_2_exit (
+            prev_command_id INTEGER NOT NULL REFERENCES commands(id),
+            command_id INTEGER NOT NULL REFERENCES commands(id),
+            prev_exit_ok INTEGER NOT NULL,  -- 1 = prev exited 0, 0 = prev failed
+            frequency INTEGER NOT NULL DEFAULT 1,
+            last_used INTEGER NOT NULL,
+            PRIMARY KEY (prev_command_id, command_id, prev_exit_ok)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ngrams_2_exit_prev ON ngrams_2_exit(prev_command_id, prev_exit_ok);
+    "#).context("Failed to apply migration v4")?;
+
+    info!("Migration v4: created ngrams_2_exit table for exit-aware n-grams");
+    Ok(())
+}
+
+/// Migration v5: Add has_local_file_args column to history table
+fn apply_migration_v5(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE history ADD COLUMN has_local_file_args INTEGER NOT NULL DEFAULT 0",
+    )
+    .context("Failed to apply migration v5")?;
+
+    info!("Migration v5: added has_local_file_args column to history table");
     Ok(())
 }
 
