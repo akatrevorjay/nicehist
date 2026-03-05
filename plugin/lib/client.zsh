@@ -24,6 +24,7 @@ function _nicehist_store_async() {
     local start_time="$5"
     local prev_cmd="$6"
     local prev2_cmd="$7"
+    local prev_exit="$8"
 
     _nicehist_ensure_cli || return 1
 
@@ -34,6 +35,7 @@ function _nicehist_store_async() {
     [[ -n "$_NICEHIST_SESSION_ID" ]] && argv+=(--session-id "$_NICEHIST_SESSION_ID")
     [[ -n "$prev_cmd" ]] && argv+=(--prev-cmd "$prev_cmd")
     [[ -n "$prev2_cmd" ]] && argv+=(--prev2-cmd "$prev2_cmd")
+    [[ -n "$prev_exit" ]] && argv+=(--prev-exit "$prev_exit")
 
     { "${argv[@]}" &>/dev/null } &!
 }
@@ -49,6 +51,7 @@ function _nicehist_predict() {
     local -a argv=("$_NICEHIST_CLI_PATH" predict --prefix "$prefix" --cwd "$cwd" --limit "$limit" --plain)
     [[ -n "$_NICEHIST_LAST_CMD" ]] && argv+=(--last-cmd "$_NICEHIST_LAST_CMD")
     [[ -n "$_NICEHIST_PREV_CMD" ]] && argv+=(--prev-cmd "$_NICEHIST_PREV_CMD")
+    [[ -n "$_NICEHIST_LAST_EXIT" ]] && argv+=(--last-exit "$_NICEHIST_LAST_EXIT")
     (( ! ${NICEHIST[FRECENT_BOOST]:-1} )) && argv+=(--no-frecent-boost)
     [[ -n "${NICEHIST[RANK_WEIGHTS]:-}" ]] && argv+=(--weights "${NICEHIST[RANK_WEIGHTS]}")
 
@@ -67,6 +70,7 @@ function _nicehist_search() {
     [[ -n "$dir" ]] && argv+=(--dir "$dir")
     [[ -n "$_NICEHIST_LAST_CMD" ]] && argv+=(--last-cmd "$_NICEHIST_LAST_CMD")
     [[ -n "$_NICEHIST_PREV_CMD" ]] && argv+=(--prev-cmd "$_NICEHIST_PREV_CMD")
+    [[ -n "$_NICEHIST_LAST_EXIT" ]] && argv+=(--last-exit "$_NICEHIST_LAST_EXIT")
 
     "${argv[@]}" 2>/dev/null
 }

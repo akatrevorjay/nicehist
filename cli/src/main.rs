@@ -39,6 +39,9 @@ enum Commands {
         /// Enable n-gram context boost in scoring
         #[arg(long)]
         ngram_boost: bool,
+        /// Last command's exit status (for exit-aware n-gram scoring)
+        #[arg(long)]
+        last_exit: Option<i32>,
         /// Current working directory (for local file penalty scoring)
         #[arg(long, default_value_t = default_cwd())]
         cwd: String,
@@ -69,6 +72,9 @@ enum Commands {
         /// Command before previous (for n-gram context)
         #[arg(long)]
         prev2_cmd: Option<String>,
+        /// Previous command's exit status (for exit-aware n-grams)
+        #[arg(long)]
+        prev_exit: Option<i32>,
     },
     /// Get command predictions
     Predict {
@@ -93,6 +99,9 @@ enum Commands {
         /// Output one command per line, no scores (for widget consumption)
         #[arg(long)]
         plain: bool,
+        /// Last command's exit status (for exit-aware n-gram scoring)
+        #[arg(long)]
+        last_exit: Option<i32>,
         /// Disable frecent directory boost
         #[arg(long)]
         no_frecent_boost: bool,
@@ -284,6 +293,7 @@ fn cmd_search(
     last_cmd: Option<&str>,
     prev_cmd: Option<&str>,
     ngram_boost: bool,
+    last_exit: Option<i32>,
     cwd: &str,
 ) -> Result<()> {
     let mut params = serde_json::json!({
@@ -306,6 +316,9 @@ fn cmd_search(
     }
     if !last_cmds.is_empty() {
         params["last_cmds"] = serde_json::json!(last_cmds);
+    }
+    if let Some(exit) = last_exit {
+        params["last_exit"] = serde_json::json!(exit);
     }
 
     if !cwd.is_empty() {
@@ -583,6 +596,7 @@ fn cmd_store(
     session_id: Option<i64>,
     prev_cmd: Option<&str>,
     prev2_cmd: Option<&str>,
+    prev_exit: Option<i32>,
 ) -> Result<()> {
     let mut params = serde_json::json!({
         "cmd": cmd,
@@ -607,6 +621,9 @@ fn cmd_store(
     if let Some(v) = prev2_cmd {
         params["prev2_cmd"] = serde_json::json!(v);
     }
+    if let Some(v) = prev_exit {
+        params["prev_exit"] = serde_json::json!(v);
+    }
 
     let request = RpcRequest {
         method: "store".to_string(),
@@ -627,6 +644,7 @@ fn cmd_predict(
     plain: bool,
     frecent_boost: bool,
     weights_json: Option<&str>,
+    last_exit: Option<i32>,
 ) -> Result<()> {
     let mut params = serde_json::json!({
         "prefix": prefix,
@@ -650,6 +668,9 @@ fn cmd_predict(
     }
     if !last_cmds.is_empty() {
         params["last_cmds"] = serde_json::json!(last_cmds);
+    }
+    if let Some(exit) = last_exit {
+        params["last_exit"] = serde_json::json!(exit);
     }
 
     let request = RpcRequest {
@@ -897,23 +918,23 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Search { pattern, limit, dir, plain, last_cmd, prev_cmd, ngram_boost, cwd } => {
-            cmd_search(&pattern, limit, dir.as_deref(), plain, last_cmd.as_deref(), prev_cmd.as_deref(), ngram_boost, &cwd)?;
+        Commands::Search { pattern, limit, dir, plain, last_cmd, prev_cmd, ngram_boost, last_exit, cwd } => {
+            cmd_search(&pattern, limit, dir.as_deref(), plain, last_cmd.as_deref(), prev_cmd.as_deref(), ngram_boost, last_exit, &cwd)?;
         }
         Commands::Store {
             cmd, cwd, exit_status, duration_ms, start_time,
-            session_id, prev_cmd, prev2_cmd,
+            session_id, prev_cmd, prev2_cmd, prev_exit,
         } => {
             cmd_store(&cmd, &cwd, exit_status, duration_ms, start_time,
-                      session_id, prev_cmd.as_deref(), prev2_cmd.as_deref())?;
+                      session_id, prev_cmd.as_deref(), prev2_cmd.as_deref(), prev_exit)?;
         }
         Commands::Predict {
             prefix, cwd, limit, last_cmd, prev_cmd, timeout_ms, plain,
-            no_frecent_boost, weights,
+            last_exit, no_frecent_boost, weights,
         } => {
             cmd_predict(&prefix, &cwd, limit, last_cmd.as_deref(),
                         prev_cmd.as_deref(), timeout_ms, plain, !no_frecent_boost,
-                        weights.as_deref())?;
+                        weights.as_deref(), last_exit)?;
         }
         Commands::Context { cwd } => {
             cmd_context(&cwd)?;

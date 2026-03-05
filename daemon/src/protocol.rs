@@ -82,6 +82,9 @@ pub struct StoreParams {
     /// Second previous command (for trigram updates)
     #[serde(default)]
     pub prev2_cmd: Option<String>,
+    /// Previous command's exit status (for exit-aware n-grams)
+    #[serde(default)]
+    pub prev_exit: Option<i32>,
 }
 
 /// Configurable ranking weights for prediction scoring
@@ -108,6 +111,15 @@ pub struct RankingWeights {
     /// Weight for n-gram (bigram/trigram) sequence bonus (default: 0.40)
     #[serde(default = "default_ngram_weight")]
     pub ngram: f64,
+    /// Days for n-gram recency decay half-life (default: 60.0)
+    #[serde(default = "default_ngram_recency_halflife")]
+    pub ngram_recency_halflife: f64,
+    /// Multiplier for trigram bonus over bigram (default: 1.5)
+    #[serde(default = "default_ngram_trigram_boost")]
+    pub ngram_trigram_boost: f64,
+    /// Multiplier when exit-aware data matches (default: 1.2)
+    #[serde(default = "default_ngram_exit_boost")]
+    pub ngram_exit_boost: f64,
     /// Penalty factor for commands with local file args when searching from different dir (default: 0.3)
     #[serde(default = "default_local_file_penalty")]
     pub local_file_penalty: f64,
@@ -123,6 +135,9 @@ impl Default for RankingWeights {
             failure_penalty: 0.5,
             frecent_boost_max: 0.1,
             ngram: 0.40,
+            ngram_recency_halflife: 60.0,
+            ngram_trigram_boost: 1.5,
+            ngram_exit_boost: 1.2,
             local_file_penalty: 0.3,
         }
     }
@@ -135,6 +150,9 @@ fn default_dir_hierarchy_weight() -> f64 { 0.15 }
 fn default_failure_penalty() -> f64 { 0.5 }
 fn default_frecent_boost_max() -> f64 { 0.1 }
 fn default_ngram_weight() -> f64 { 0.40 }
+fn default_ngram_recency_halflife() -> f64 { 60.0 }
+fn default_ngram_trigram_boost() -> f64 { 1.5 }
+fn default_ngram_exit_boost() -> f64 { 1.2 }
 fn default_local_file_penalty() -> f64 { 0.3 }
 
 /// Parameters for the "predict" method
@@ -156,6 +174,9 @@ pub struct PredictParams {
     /// Optional ranking weight overrides
     #[serde(default)]
     pub weights: Option<RankingWeights>,
+    /// Last command's exit status (for exit-aware n-gram scoring)
+    #[serde(default)]
+    pub last_exit: Option<i32>,
 }
 
 fn default_true() -> bool {
@@ -229,6 +250,9 @@ pub struct SearchParams {
     /// Enable n-gram context boost in scoring (default: false for backward compat)
     #[serde(default)]
     pub ngram_boost: bool,
+    /// Last command's exit status (for exit-aware n-gram scoring)
+    #[serde(default)]
+    pub last_exit: Option<i32>,
 }
 
 fn default_search_limit() -> usize {

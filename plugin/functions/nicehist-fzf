@@ -27,6 +27,7 @@ history_source() {
             argv+=(--ngram-boost)
             [[ -n "$_NICEHIST_LAST_CMD" ]] && argv+=(--last-cmd "$_NICEHIST_LAST_CMD")
             [[ -n "$_NICEHIST_PREV_CMD" ]] && argv+=(--prev-cmd "$_NICEHIST_PREV_CMD")
+            [[ -n "$_NICEHIST_LAST_EXIT" ]] && argv+=(--last-exit "$_NICEHIST_LAST_EXIT")
         fi
         "${argv[@]}" && return
     fi

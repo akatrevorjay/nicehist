@@ -69,6 +69,16 @@ CREATE TABLE IF NOT EXISTS ngrams_3 (
     PRIMARY KEY (prev2_command_id, prev1_command_id, command_id)
 );
 
+-- Exit-aware bigram: P(command | prev_command, prev_exit_ok)
+CREATE TABLE IF NOT EXISTS ngrams_2_exit (
+    prev_command_id INTEGER NOT NULL REFERENCES commands(id),
+    command_id INTEGER NOT NULL REFERENCES commands(id),
+    prev_exit_ok INTEGER NOT NULL,  -- 1 = prev exited 0, 0 = prev failed
+    frequency INTEGER NOT NULL DEFAULT 1,
+    last_used INTEGER NOT NULL,
+    PRIMARY KEY (prev_command_id, command_id, prev_exit_ok)
+);
+
 -- Directory-command frequency (for context scoring)
 CREATE TABLE IF NOT EXISTS dir_command_freq (
     place_id INTEGER NOT NULL REFERENCES places(id),
@@ -126,6 +136,7 @@ CREATE INDEX IF NOT EXISTS idx_commands_argv ON commands(argv);
 CREATE INDEX IF NOT EXISTS idx_places_dir ON places(dir);
 CREATE INDEX IF NOT EXISTS idx_ngrams_2_prev ON ngrams_2(prev_command_id);
 CREATE INDEX IF NOT EXISTS idx_ngrams_3_prev ON ngrams_3(prev2_command_id, prev1_command_id);
+CREATE INDEX IF NOT EXISTS idx_ngrams_2_exit_prev ON ngrams_2_exit(prev_command_id, prev_exit_ok);
 CREATE INDEX IF NOT EXISTS idx_parsed_commands_program ON parsed_commands(program);
 CREATE INDEX IF NOT EXISTS idx_parsed_commands_subcommand ON parsed_commands(program, subcommand);
 CREATE INDEX IF NOT EXISTS idx_arg_patterns_lookup ON arg_patterns(program, subcommand);

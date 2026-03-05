@@ -119,6 +119,12 @@ impl Database {
             let prev_id = self.get_or_create_command(&conn, prev_cmd)?;
             self.update_bigram(&conn, prev_id, command_id)?;
 
+            // Update exit-aware bigram if previous exit status provided
+            if let Some(prev_exit) = params.prev_exit {
+                let prev_exit_ok = if prev_exit == 0 { 1i32 } else { 0 };
+                self.update_bigram_exit(&conn, prev_id, command_id, prev_exit_ok)?;
+            }
+
             if let Some(ref prev2_cmd) = params.prev2_cmd {
                 let prev2_id = self.get_or_create_command(&conn, prev2_cmd)?;
                 self.update_trigram(&conn, prev2_id, prev_id, command_id)?;
@@ -202,6 +208,25 @@ impl Database {
                 frequency = frequency + 1,
                 last_used = ?4",
             rusqlite::params![prev2_id, prev1_id, cmd_id, now],
+        )?;
+        Ok(())
+    }
+
+    fn update_bigram_exit(
+        &self,
+        conn: &Connection,
+        prev_id: i64,
+        cmd_id: i64,
+        prev_exit_ok: i32,
+    ) -> Result<()> {
+        let now = chrono_lite_timestamp();
+        conn.execute(
+            "INSERT INTO ngrams_2_exit (prev_command_id, command_id, prev_exit_ok, frequency, last_used)
+             VALUES (?1, ?2, ?3, 1, ?4)
+             ON CONFLICT(prev_command_id, command_id, prev_exit_ok) DO UPDATE SET
+                frequency = frequency + 1,
+                last_used = ?4",
+            rusqlite::params![prev_id, cmd_id, prev_exit_ok, now],
         )?;
         Ok(())
     }
@@ -373,7 +398,8 @@ impl Database {
         let mut suggestions = Vec::new();
 
         // Strategy 1: Compute n-gram bonus scores (additive, applied in strategy 2)
-        let ngram_bonus = self.compute_ngram_bonus(conn, &params.last_cmds, &params.prefix, params.limit)?;
+        let w = params.weights.clone().unwrap_or_default();
+        let ngram_bonus = self.compute_ngram_bonus(conn, &params.last_cmds, &params.prefix, params.limit, params.last_exit, &w)?;
 
         // Strategy 2: Prefix match with recency, directory, and parent directory weighting
         // Build list of directories to check (current + ancestors)
@@ -432,7 +458,6 @@ impl Database {
         })?;
 
         let now = chrono_lite_timestamp();
-        let w = params.weights.clone().unwrap_or_default();
 
         // Cross-pollination: boost predictions in frecent directories
         let frecent_boost = if params.frecent_boost {
@@ -490,13 +515,18 @@ impl Database {
 
     /// Compute n-gram bonus scores for commands following the given previous commands.
     /// Returns a HashMap of command → bonus score (0.0-1.0).
-    /// Trigrams get a 1.5x multiplier over bigrams.
+    ///
+    /// Uses conditional probability (freq/total_successors) instead of raw ln(freq),
+    /// applies recency decay based on last_used timestamp, and optionally boosts
+    /// exit-aware bigrams when last_exit is provided.
     fn compute_ngram_bonus(
         &self,
         conn: &Connection,
         last_cmds: &[String],
         prefix: &str,
         limit: usize,
+        last_exit: Option<i32>,
+        w: &crate::protocol::RankingWeights,
     ) -> Result<std::collections::HashMap<String, f64>> {
         let mut ngram_bonus: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
 
@@ -504,57 +534,133 @@ impl Database {
             return Ok(ngram_bonus);
         }
 
+        let now = chrono_lite_timestamp();
+        let halflife = w.ngram_recency_halflife;
+
         let prev1_cmd = &last_cmds[0];
         if let Ok(prev1_id) = self.get_command_id(conn, prev1_cmd) {
             // Trigram lookup: if we have two previous commands
             if last_cmds.len() >= 2 {
                 let prev2_cmd = &last_cmds[1];
                 if let Ok(prev2_id) = self.get_command_id(conn, prev2_cmd) {
+                    // Fetch total trigram successor frequency for conditional probability
+                    let total_trigram: f64 = conn.query_row(
+                        "SELECT COALESCE(SUM(frequency), 0) FROM ngrams_3 WHERE prev2_command_id = ?1 AND prev1_command_id = ?2",
+                        rusqlite::params![prev2_id, prev1_id],
+                        |row| row.get(0),
+                    ).unwrap_or(0.0);
+
+                    if total_trigram > 0.0 {
+                        let mut stmt = conn.prepare_cached(
+                            "SELECT c.argv, n.frequency, n.last_used
+                             FROM ngrams_3 n
+                             JOIN commands c ON c.id = n.command_id
+                             WHERE n.prev2_command_id = ?1 AND n.prev1_command_id = ?2
+                               AND c.argv LIKE ?3 || '%'
+                             ORDER BY n.frequency DESC
+                             LIMIT ?4",
+                        )?;
+
+                        let rows = stmt.query_map(
+                            rusqlite::params![prev2_id, prev1_id, prefix, limit],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+                        )?;
+
+                        for row in rows {
+                            if let Ok((cmd, freq, last_used)) = row {
+                                let cond_prob = freq as f64 / total_trigram;
+                                let age_days = (now - last_used) as f64 / 86400.0;
+                                let recency = (-age_days / halflife).exp();
+                                let bonus = (cond_prob * recency * w.ngram_trigram_boost).min(1.0);
+                                ngram_bonus.insert(cmd, bonus);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Exit-aware bigram lookup (if last_exit provided)
+            // Track which commands got exit-aware scores so we can skip them in general bigram
+            let mut exit_scored: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+            if let Some(exit_code) = last_exit {
+                let prev_exit_ok = if exit_code == 0 { 1i32 } else { 0 };
+
+                let total_exit: f64 = conn.query_row(
+                    "SELECT COALESCE(SUM(frequency), 0) FROM ngrams_2_exit WHERE prev_command_id = ?1 AND prev_exit_ok = ?2",
+                    rusqlite::params![prev1_id, prev_exit_ok],
+                    |row| row.get(0),
+                ).unwrap_or(0.0);
+
+                if total_exit > 0.0 {
                     let mut stmt = conn.prepare_cached(
-                        "SELECT c.argv, n.frequency
-                         FROM ngrams_3 n
+                        "SELECT c.argv, n.frequency, n.last_used
+                         FROM ngrams_2_exit n
                          JOIN commands c ON c.id = n.command_id
-                         WHERE n.prev2_command_id = ?1 AND n.prev1_command_id = ?2
+                         WHERE n.prev_command_id = ?1 AND n.prev_exit_ok = ?2
                            AND c.argv LIKE ?3 || '%'
                          ORDER BY n.frequency DESC
                          LIMIT ?4",
                     )?;
 
                     let rows = stmt.query_map(
-                        rusqlite::params![prev2_id, prev1_id, prefix, limit],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                        rusqlite::params![prev1_id, prev_exit_ok, prefix, limit],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
                     )?;
 
                     for row in rows {
-                        if let Ok((cmd, freq)) = row {
-                            // Trigrams get a 1.5x multiplier over bigrams (stronger signal)
-                            let bonus = ((freq as f64).ln().max(0.0) / 10.0) * 1.5;
-                            ngram_bonus.insert(cmd, bonus.min(1.0));
+                        if let Ok((cmd, freq, last_used)) = row {
+                            let cond_prob = freq as f64 / total_exit;
+                            let age_days = (now - last_used) as f64 / 86400.0;
+                            let recency = (-age_days / halflife).exp();
+                            let bonus = (cond_prob * recency * w.ngram_exit_boost).min(1.0);
+                            // Only use exit-aware score if trigram didn't already provide a higher one
+                            let current = ngram_bonus.get(&cmd).copied().unwrap_or(0.0);
+                            if bonus > current {
+                                ngram_bonus.insert(cmd.clone(), bonus);
+                            }
+                            exit_scored.insert(cmd);
                         }
                     }
                 }
             }
 
-            // Bigram lookup: prev1 → ?
-            let mut stmt = conn.prepare_cached(
-                "SELECT c.argv, n.frequency
-                 FROM ngrams_2 n
-                 JOIN commands c ON c.id = n.command_id
-                 WHERE n.prev_command_id = ?1 AND c.argv LIKE ?2 || '%'
-                 ORDER BY n.frequency DESC
-                 LIMIT ?3",
-            )?;
+            // General bigram lookup: prev1 → ?
+            // Fetch total bigram successor frequency for conditional probability
+            let total_bigram: f64 = conn.query_row(
+                "SELECT COALESCE(SUM(frequency), 0) FROM ngrams_2 WHERE prev_command_id = ?1",
+                rusqlite::params![prev1_id],
+                |row| row.get(0),
+            ).unwrap_or(0.0);
 
-            let rows = stmt.query_map(
-                rusqlite::params![prev1_id, prefix, limit],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            )?;
+            if total_bigram > 0.0 {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT c.argv, n.frequency, n.last_used
+                     FROM ngrams_2 n
+                     JOIN commands c ON c.id = n.command_id
+                     WHERE n.prev_command_id = ?1 AND c.argv LIKE ?2 || '%'
+                     ORDER BY n.frequency DESC
+                     LIMIT ?3",
+                )?;
 
-            for row in rows {
-                if let Ok((cmd, freq)) = row {
-                    let bonus = (freq as f64).ln().max(0.0) / 10.0;
-                    // Only insert if trigram didn't already provide a higher bonus
-                    ngram_bonus.entry(cmd).or_insert(bonus.min(1.0));
+                let rows = stmt.query_map(
+                    rusqlite::params![prev1_id, prefix, limit],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+                )?;
+
+                for row in rows {
+                    if let Ok((cmd, freq, last_used)) = row {
+                        // Skip if exit-aware data already scored this command
+                        if exit_scored.contains(&cmd) {
+                            continue;
+                        }
+                        let cond_prob = freq as f64 / total_bigram;
+                        let age_days = (now - last_used) as f64 / 86400.0;
+                        let recency = (-age_days / halflife).exp();
+                        let bonus = (cond_prob * recency).min(1.0);
+                        // Only insert if trigram didn't already provide a higher bonus
+                        ngram_bonus.entry(cmd).or_insert(bonus);
+                    }
                 }
             }
         }
@@ -863,6 +969,10 @@ impl Database {
             [command_id],
         )?;
         conn.execute(
+            "DELETE FROM ngrams_2_exit WHERE command_id = ?1 OR prev_command_id = ?1",
+            [command_id],
+        )?;
+        conn.execute(
             "DELETE FROM dir_command_freq WHERE command_id = ?1",
             [command_id],
         )?;
@@ -899,7 +1009,7 @@ impl Database {
         // Compute n-gram bonuses if enabled
         let w = crate::protocol::RankingWeights::default();
         let ngram_bonus = if params.ngram_boost && !params.last_cmds.is_empty() {
-            self.compute_ngram_bonus(&conn, &params.last_cmds, "", params.limit)?
+            self.compute_ngram_bonus(&conn, &params.last_cmds, "", params.limit, params.last_exit, &w)?
         } else {
             std::collections::HashMap::new()
         };
@@ -1119,6 +1229,7 @@ mod tests {
             session_id: Some(12345),
             prev_cmd: None,
             prev2_cmd: None,
+            prev_exit: None,
         };
 
         let id = db.store_command(&params).unwrap();
@@ -1133,6 +1244,7 @@ mod tests {
             last_cmds: vec![],
             cwd: None,
             ngram_boost: false,
+            last_exit: None,
         };
 
         let results = db.search(&search_params).unwrap();
@@ -1154,6 +1266,7 @@ mod tests {
             session_id: Some(12345),
             prev_cmd: None,
             prev2_cmd: None,
+            prev_exit: None,
         };
         db.store_command(&params1).unwrap();
 
@@ -1167,6 +1280,7 @@ mod tests {
             session_id: Some(12345),
             prev_cmd: Some("git add -A".to_string()),
             prev2_cmd: None,
+            prev_exit: None,
         };
         db.store_command(&params2).unwrap();
 
@@ -1193,6 +1307,7 @@ mod tests {
                 session_id: None,
                 prev_cmd: None,
                 prev2_cmd: None,
+                prev_exit: None,
             };
             db.store_command(&params).unwrap();
         }
@@ -1205,6 +1320,7 @@ mod tests {
             limit: 5,
             frecent_boost: true,
             weights: None,
+            last_exit: None,
         };
 
         let suggestions = db.predict(&predict_params).unwrap();
@@ -1343,6 +1459,7 @@ mod tests {
                 session_id: Some(12345),
                 prev_cmd: None,
                 prev2_cmd: None,
+                prev_exit: None,
             };
             db.store_command(&params1).unwrap();
 
@@ -1355,6 +1472,7 @@ mod tests {
                 session_id: Some(12345),
                 prev_cmd: Some("git add -A".to_string()),
                 prev2_cmd: None,
+                prev_exit: None,
             };
             db.store_command(&params2).unwrap();
         }
@@ -1367,6 +1485,7 @@ mod tests {
             limit: 5,
             frecent_boost: true,
             weights: None,
+            last_exit: None,
         };
 
         let suggestions = db.predict(&predict_params).unwrap();
@@ -1389,7 +1508,7 @@ mod tests {
                 start_time: Some(1700000000 + i * 10),
                 session_id: Some(1),
                 prev_cmd: None,
-                prev2_cmd: None,
+                prev2_cmd: None, prev_exit: None,
             }).unwrap();
 
             db.store_command(&StoreParams {
@@ -1400,7 +1519,7 @@ mod tests {
                 start_time: Some(1700000005 + i * 10),
                 session_id: Some(1),
                 prev_cmd: Some("make build".to_string()),
-                prev2_cmd: None,
+                prev2_cmd: None, prev_exit: None,
             }).unwrap();
         }
 
@@ -1414,7 +1533,7 @@ mod tests {
                 start_time: Some(1700000200 + i * 10),
                 session_id: Some(1),
                 prev_cmd: None,
-                prev2_cmd: None,
+                prev2_cmd: None, prev_exit: None,
             }).unwrap();
         }
 
@@ -1426,6 +1545,7 @@ mod tests {
             limit: 5,
             frecent_boost: false,
             weights: None,
+            last_exit: None,
         }).unwrap();
 
         assert!(suggestions.len() >= 2, "Expected at least 2 suggestions, got {}", suggestions.len());
@@ -1450,6 +1570,7 @@ mod tests {
             limit: 5,
             frecent_boost: false,
             weights: None,
+            last_exit: None,
         }).unwrap();
 
         // All three make commands should appear
@@ -1471,7 +1592,7 @@ mod tests {
                 exit_status: Some(0), duration_ms: Some(50),
                 start_time: Some(1700000000 + i * 30),
                 session_id: Some(1),
-                prev_cmd: None, prev2_cmd: None,
+                prev_cmd: None, prev2_cmd: None, prev_exit: None,
             }).unwrap();
 
             db.store_command(&StoreParams {
@@ -1481,7 +1602,7 @@ mod tests {
                 start_time: Some(1700000010 + i * 30),
                 session_id: Some(1),
                 prev_cmd: Some("git add -A".to_string()),
-                prev2_cmd: None,
+                prev2_cmd: None, prev_exit: None,
             }).unwrap();
 
             db.store_command(&StoreParams {
@@ -1492,6 +1613,7 @@ mod tests {
                 session_id: Some(1),
                 prev_cmd: Some("git commit -m 'wip'".to_string()),
                 prev2_cmd: Some("git add -A".to_string()),
+                prev_exit: None,
             }).unwrap();
         }
 
@@ -1504,7 +1626,7 @@ mod tests {
                 start_time: Some(1700000300 + i * 10),
                 session_id: Some(1),
                 prev_cmd: Some("git commit -m 'wip'".to_string()),
-                prev2_cmd: None,
+                prev2_cmd: None, prev_exit: None,
             }).unwrap();
         }
 
@@ -1519,6 +1641,7 @@ mod tests {
             limit: 5,
             frecent_boost: false,
             weights: None,
+            last_exit: None,
         }).unwrap();
 
         // git push should benefit from both the trigram (add→commit→push) and bigram (commit→push)
@@ -1546,7 +1669,7 @@ mod tests {
                 exit_status: Some(0), duration_ms: Some(10),
                 start_time: Some(1700000000 + i * 10),
                 session_id: Some(1),
-                prev_cmd: None, prev2_cmd: None,
+                prev_cmd: None, prev2_cmd: None, prev_exit: None,
             }).unwrap();
         }
 
@@ -1554,7 +1677,7 @@ mod tests {
             pattern: "ls".to_string(),
             limit: 10,
             dir: None, exit_status: None,
-            last_cmds: vec![], cwd: None, ngram_boost: false,
+            last_cmds: vec![], cwd: None, ngram_boost: false, last_exit: None,
         }).unwrap();
 
         // Should return exactly 1 result, not 5
@@ -1573,7 +1696,7 @@ mod tests {
             exit_status: Some(0), duration_ms: Some(10),
             start_time: Some(1700000000),
             session_id: Some(1),
-            prev_cmd: None, prev2_cmd: None,
+            prev_cmd: None, prev2_cmd: None, prev_exit: None,
         }).unwrap();
 
         for i in 0..20 {
@@ -1583,7 +1706,7 @@ mod tests {
                 exit_status: Some(0), duration_ms: Some(10),
                 start_time: Some(1700000000 + i),
                 session_id: Some(1),
-                prev_cmd: None, prev2_cmd: None,
+                prev_cmd: None, prev2_cmd: None, prev_exit: None,
             }).unwrap();
         }
 
@@ -1591,7 +1714,7 @@ mod tests {
             pattern: "cmd".to_string(),
             limit: 10,
             dir: None, exit_status: None,
-            last_cmds: vec![], cwd: None, ngram_boost: false,
+            last_cmds: vec![], cwd: None, ngram_boost: false, last_exit: None,
         }).unwrap();
 
         assert!(results.len() >= 2);
@@ -1614,7 +1737,7 @@ mod tests {
                 exit_status: Some(0), duration_ms: Some(100),
                 start_time: Some(1700000000 + i * 10),
                 session_id: Some(1),
-                prev_cmd: None, prev2_cmd: None,
+                prev_cmd: None, prev2_cmd: None, prev_exit: None,
             }).unwrap();
             db.store_command(&StoreParams {
                 cmd: "cargo test".to_string(),
@@ -1623,7 +1746,7 @@ mod tests {
                 start_time: Some(1700000005 + i * 10),
                 session_id: Some(1),
                 prev_cmd: Some("cargo build".to_string()),
-                prev2_cmd: None,
+                prev2_cmd: None, prev_exit: None,
             }).unwrap();
         }
 
@@ -1635,7 +1758,7 @@ mod tests {
                 exit_status: Some(0), duration_ms: Some(100),
                 start_time: Some(1700000000 + i * 10),
                 session_id: Some(1),
-                prev_cmd: None, prev2_cmd: None,
+                prev_cmd: None, prev2_cmd: None, prev_exit: None,
             }).unwrap();
         }
 
@@ -1645,7 +1768,7 @@ mod tests {
             limit: 10,
             dir: None, exit_status: None,
             last_cmds: vec!["cargo build".to_string()],
-            cwd: None, ngram_boost: true,
+            cwd: None, ngram_boost: true, last_exit: None,
         }).unwrap();
 
         let test_entry = with_ngram.iter().find(|r| r.cmd == "cargo test").unwrap();
@@ -1669,7 +1792,7 @@ mod tests {
                 exit_status: Some(0), duration_ms: Some(10),
                 start_time: Some(1700000000 + i),
                 session_id: Some(1),
-                prev_cmd: None, prev2_cmd: None,
+                prev_cmd: None, prev2_cmd: None, prev_exit: None,
             }).unwrap();
         }
 
@@ -1681,7 +1804,7 @@ mod tests {
                 exit_status: Some(1), duration_ms: Some(10),
                 start_time: Some(1700000000 + i),
                 session_id: Some(1),
-                prev_cmd: None, prev2_cmd: None,
+                prev_cmd: None, prev2_cmd: None, prev_exit: None,
             }).unwrap();
         }
 
@@ -1692,6 +1815,7 @@ mod tests {
             limit: 10,
             frecent_boost: false,
             weights: None,
+            last_exit: None,
         }).unwrap();
 
         let good = results.iter().find(|s| s.cmd == "good-cmd");
@@ -1712,7 +1836,7 @@ mod tests {
             exit_status: Some(0), duration_ms: Some(10),
             start_time: Some(1700000000),
             session_id: Some(1),
-            prev_cmd: None, prev2_cmd: None,
+            prev_cmd: None, prev2_cmd: None, prev_exit: None,
         }).unwrap();
 
         // Verify it exists
@@ -1720,7 +1844,7 @@ mod tests {
             pattern: "secret".to_string(),
             limit: 10,
             dir: None, exit_status: None,
-            last_cmds: vec![], cwd: None, ngram_boost: false,
+            last_cmds: vec![], cwd: None, ngram_boost: false, last_exit: None,
         }).unwrap();
         assert_eq!(results.len(), 1);
 
@@ -1733,7 +1857,7 @@ mod tests {
             pattern: "secret".to_string(),
             limit: 10,
             dir: None, exit_status: None,
-            last_cmds: vec![], cwd: None, ngram_boost: false,
+            last_cmds: vec![], cwd: None, ngram_boost: false, last_exit: None,
         }).unwrap();
         assert_eq!(results.len(), 0);
     }
@@ -1750,7 +1874,7 @@ mod tests {
                 exit_status: Some(0), duration_ms: Some(10),
                 start_time: Some(1700000000 + i),
                 session_id: Some(1),
-                prev_cmd: None, prev2_cmd: None,
+                prev_cmd: None, prev2_cmd: None, prev_exit: None,
             }).unwrap();
         }
         db.store_command(&StoreParams {
@@ -1759,7 +1883,7 @@ mod tests {
             exit_status: Some(0), duration_ms: Some(10),
             start_time: None, // defaults to now
             session_id: Some(1),
-            prev_cmd: None, prev2_cmd: None,
+            prev_cmd: None, prev2_cmd: None, prev_exit: None,
         }).unwrap();
 
         // With high frequency weight, frequent-cmd should win
@@ -1777,8 +1901,12 @@ mod tests {
                 dir_hierarchy: 0.0,
                 failure_penalty: 0.0,
                 frecent_boost_max: 0.0,
+                ngram_recency_halflife: 60.0,
+                ngram_trigram_boost: 1.5,
+                ngram_exit_boost: 1.2,
                 local_file_penalty: 0.0,
             }),
+            last_exit: None,
         }).unwrap();
 
         assert!(!freq_heavy.is_empty());
@@ -1834,7 +1962,7 @@ mod tests {
                 exit_status: Some(0), duration_ms: Some(50),
                 start_time: Some(1700000000 + i * 10),
                 session_id: Some(1),
-                prev_cmd: None, prev2_cmd: None,
+                prev_cmd: None, prev2_cmd: None, prev_exit: None,
             }).unwrap();
         }
         for i in 0..3 {
@@ -1844,7 +1972,7 @@ mod tests {
                 exit_status: Some(0), duration_ms: Some(50),
                 start_time: Some(1700000100 + i * 10),
                 session_id: Some(1),
-                prev_cmd: None, prev2_cmd: None,
+                prev_cmd: None, prev2_cmd: None, prev_exit: None,
             }).unwrap();
         }
 
@@ -1870,7 +1998,7 @@ mod tests {
             exit_status: Some(0), duration_ms: Some(50),
             start_time: Some(1700000000),
             session_id: Some(1),
-            prev_cmd: None, prev2_cmd: None,
+            prev_cmd: None, prev2_cmd: None, prev_exit: None,
         }).unwrap();
 
         // Store a generic command from dir-a
@@ -1880,7 +2008,7 @@ mod tests {
             exit_status: Some(0), duration_ms: Some(50),
             start_time: Some(1700000000),
             session_id: Some(1),
-            prev_cmd: None, prev2_cmd: None,
+            prev_cmd: None, prev2_cmd: None, prev_exit: None,
         }).unwrap();
 
         // Manually set has_local_file_args on the first command
@@ -1901,6 +2029,7 @@ mod tests {
             last_cmds: vec![],
             cwd: Some("/home/user/dir-b".to_string()),
             ngram_boost: false,
+            last_exit: None,
         }).unwrap();
 
         assert_eq!(results.len(), 2);
@@ -1921,7 +2050,7 @@ mod tests {
             exit_status: Some(0), duration_ms: Some(50),
             start_time: Some(1700000000),
             session_id: Some(1),
-            prev_cmd: None, prev2_cmd: None,
+            prev_cmd: None, prev2_cmd: None, prev_exit: None,
         }).unwrap();
 
         // Store same command without local files for comparison
@@ -1931,7 +2060,7 @@ mod tests {
             exit_status: Some(0), duration_ms: Some(50),
             start_time: Some(1700000000),
             session_id: Some(1),
-            prev_cmd: None, prev2_cmd: None,
+            prev_cmd: None, prev2_cmd: None, prev_exit: None,
         }).unwrap();
 
         // Set has_local_file_args
@@ -1952,6 +2081,7 @@ mod tests {
             last_cmds: vec![],
             cwd: Some("/home/user/dir-a".to_string()),
             ngram_boost: false,
+            last_exit: None,
         }).unwrap();
 
         let local_score = results.iter().find(|r| r.cmd == "vim foo.py").unwrap().score.unwrap();
@@ -1972,7 +2102,7 @@ mod tests {
             exit_status: Some(0), duration_ms: Some(50),
             start_time: Some(1700000000),
             session_id: Some(1),
-            prev_cmd: None, prev2_cmd: None,
+            prev_cmd: None, prev2_cmd: None, prev_exit: None,
         }).unwrap();
 
         db.store_command(&StoreParams {
@@ -1981,7 +2111,7 @@ mod tests {
             exit_status: Some(0), duration_ms: Some(50),
             start_time: Some(1700000000),
             session_id: Some(1),
-            prev_cmd: None, prev2_cmd: None,
+            prev_cmd: None, prev2_cmd: None, prev_exit: None,
         }).unwrap();
 
         // Set has_local_file_args
@@ -2001,6 +2131,7 @@ mod tests {
             limit: 10,
             frecent_boost: false,
             weights: None,
+            last_exit: None,
         }).unwrap();
 
         assert!(suggestions.len() >= 2);
@@ -2008,5 +2139,196 @@ mod tests {
         let generic_score = suggestions.iter().find(|s| s.cmd == "vim --version").unwrap().score;
         assert!(local_score < generic_score,
             "Local file command should score lower in predict from different dir: {:.4} vs {:.4}", local_score, generic_score);
+    }
+
+    #[test]
+    fn test_conditional_probability_scoring() {
+        let db = Database::open_in_memory().unwrap();
+
+        // prev_A → cmd_target 8 times out of 10 total successors (80%)
+        for i in 0..8 {
+            db.store_command(&StoreParams {
+                cmd: "cmd_target".to_string(),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(0), duration_ms: Some(10),
+                start_time: Some(1700000000 + i),
+                session_id: Some(1),
+                prev_cmd: Some("prev_A".to_string()),
+                prev2_cmd: None, prev_exit: None,
+            }).unwrap();
+        }
+        for i in 0..2 {
+            db.store_command(&StoreParams {
+                cmd: "cmd_other_a".to_string(),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(0), duration_ms: Some(10),
+                start_time: Some(1700000010 + i),
+                session_id: Some(1),
+                prev_cmd: Some("prev_A".to_string()),
+                prev2_cmd: None, prev_exit: None,
+            }).unwrap();
+        }
+
+        // prev_B → cmd_target 8 times out of 100 total successors (8%)
+        for i in 0..8 {
+            db.store_command(&StoreParams {
+                cmd: "cmd_target".to_string(),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(0), duration_ms: Some(10),
+                start_time: Some(1700000100 + i),
+                session_id: Some(1),
+                prev_cmd: Some("prev_B".to_string()),
+                prev2_cmd: None, prev_exit: None,
+            }).unwrap();
+        }
+        for i in 0..92 {
+            db.store_command(&StoreParams {
+                cmd: format!("cmd_noise_{}", i),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(0), duration_ms: Some(10),
+                start_time: Some(1700000200 + i as i64),
+                session_id: Some(1),
+                prev_cmd: Some("prev_B".to_string()),
+                prev2_cmd: None, prev_exit: None,
+            }).unwrap();
+        }
+
+        // Store prev_A and prev_B themselves
+        db.store_command(&StoreParams {
+            cmd: "prev_A".to_string(), cwd: "/home/user".to_string(),
+            exit_status: Some(0), duration_ms: Some(10),
+            start_time: Some(1700000000), session_id: Some(1),
+            prev_cmd: None, prev2_cmd: None, prev_exit: None,
+        }).unwrap();
+        db.store_command(&StoreParams {
+            cmd: "prev_B".to_string(), cwd: "/home/user".to_string(),
+            exit_status: Some(0), duration_ms: Some(10),
+            start_time: Some(1700000000), session_id: Some(1),
+            prev_cmd: None, prev2_cmd: None, prev_exit: None,
+        }).unwrap();
+
+        let w = crate::protocol::RankingWeights::default();
+        let conn = db.conn.lock().unwrap();
+
+        // After prev_A: cmd_target should have ~0.8 conditional probability
+        let bonus_a = db.compute_ngram_bonus(&conn, &["prev_A".to_string()], "cmd_target", 10, None, &w).unwrap();
+        let score_a = bonus_a.get("cmd_target").copied().unwrap_or(0.0);
+
+        // After prev_B: cmd_target should have ~0.08 conditional probability
+        let bonus_b = db.compute_ngram_bonus(&conn, &["prev_B".to_string()], "cmd_target", 10, None, &w).unwrap();
+        let score_b = bonus_b.get("cmd_target").copied().unwrap_or(0.0);
+
+        // 80% conditional probability should significantly outscore 8%
+        assert!(score_a > score_b * 2.0,
+            "Conditional prob: prev_A→target ({}) should be >> prev_B→target ({})",
+            score_a, score_b);
+    }
+
+    #[test]
+    fn test_ngram_recency_decay() {
+        let db = Database::open_in_memory().unwrap();
+        let now = chrono_lite_timestamp();
+
+        // Store prev_cmd
+        db.store_command(&StoreParams {
+            cmd: "prev_cmd".to_string(), cwd: "/home/user".to_string(),
+            exit_status: Some(0), duration_ms: Some(10),
+            start_time: Some(now), session_id: Some(1),
+            prev_cmd: None, prev2_cmd: None, prev_exit: None,
+        }).unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let prev_id = db.get_command_id(&conn, "prev_cmd").unwrap();
+
+        // Insert a recent bigram (today)
+        let recent_id = db.get_or_create_command(&conn, "recent_successor").unwrap();
+        conn.execute(
+            "INSERT INTO ngrams_2 (prev_command_id, command_id, frequency, last_used) VALUES (?1, ?2, 5, ?3)",
+            rusqlite::params![prev_id, recent_id, now],
+        ).unwrap();
+
+        // Insert a stale bigram (180 days ago, same frequency)
+        let stale_id = db.get_or_create_command(&conn, "stale_successor").unwrap();
+        let stale_time = now - 180 * 86400;
+        conn.execute(
+            "INSERT INTO ngrams_2 (prev_command_id, command_id, frequency, last_used) VALUES (?1, ?2, 5, ?3)",
+            rusqlite::params![prev_id, stale_id, stale_time],
+        ).unwrap();
+
+        let w = crate::protocol::RankingWeights::default();
+        let bonus = db.compute_ngram_bonus(&conn, &["prev_cmd".to_string()], "", 10, None, &w).unwrap();
+
+        let recent_score = bonus.get("recent_successor").copied().unwrap_or(0.0);
+        let stale_score = bonus.get("stale_successor").copied().unwrap_or(0.0);
+
+        assert!(recent_score > stale_score * 2.0,
+            "Recent bigram ({}) should significantly outscore stale bigram ({})",
+            recent_score, stale_score);
+    }
+
+    #[test]
+    fn test_exit_aware_bigram() {
+        let db = Database::open_in_memory().unwrap();
+
+        // After "make" fails → "make clean" (10 times)
+        for i in 0..10 {
+            db.store_command(&StoreParams {
+                cmd: "make clean".to_string(),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(0), duration_ms: Some(10),
+                start_time: Some(1700000000 + i),
+                session_id: Some(1),
+                prev_cmd: Some("make".to_string()),
+                prev2_cmd: None,
+                prev_exit: Some(2), // make failed
+            }).unwrap();
+        }
+
+        // After "make" succeeds → "make install" (10 times)
+        for i in 0..10 {
+            db.store_command(&StoreParams {
+                cmd: "make install".to_string(),
+                cwd: "/home/user".to_string(),
+                exit_status: Some(0), duration_ms: Some(10),
+                start_time: Some(1700000100 + i),
+                session_id: Some(1),
+                prev_cmd: Some("make".to_string()),
+                prev2_cmd: None,
+                prev_exit: Some(0), // make succeeded
+            }).unwrap();
+        }
+
+        // Store "make" itself
+        db.store_command(&StoreParams {
+            cmd: "make".to_string(), cwd: "/home/user".to_string(),
+            exit_status: Some(0), duration_ms: Some(10),
+            start_time: Some(1700000000), session_id: Some(1),
+            prev_cmd: None, prev2_cmd: None, prev_exit: None,
+        }).unwrap();
+
+        let w = crate::protocol::RankingWeights::default();
+        let conn = db.conn.lock().unwrap();
+
+        // After "make" failed: "make clean" should be boosted
+        let bonus_fail = db.compute_ngram_bonus(
+            &conn, &["make".to_string()], "make", 10, Some(2), &w,
+        ).unwrap();
+        let clean_after_fail = bonus_fail.get("make clean").copied().unwrap_or(0.0);
+        let install_after_fail = bonus_fail.get("make install").copied().unwrap_or(0.0);
+
+        assert!(clean_after_fail > install_after_fail,
+            "After make fails, 'make clean' ({}) should outscore 'make install' ({})",
+            clean_after_fail, install_after_fail);
+
+        // After "make" succeeded: "make install" should be boosted
+        let bonus_ok = db.compute_ngram_bonus(
+            &conn, &["make".to_string()], "make", 10, Some(0), &w,
+        ).unwrap();
+        let install_after_ok = bonus_ok.get("make install").copied().unwrap_or(0.0);
+        let clean_after_ok = bonus_ok.get("make clean").copied().unwrap_or(0.0);
+
+        assert!(install_after_ok > clean_after_ok,
+            "After make succeeds, 'make install' ({}) should outscore 'make clean' ({})",
+            install_after_ok, clean_after_ok);
     }
 }

@@ -9,6 +9,9 @@ function _nicehist_register_hooks() {
     add-zsh-hook precmd _nicehist_precmd
     add-zsh-hook chpwd _nicehist_chpwd
 
+    # Initialize exit status tracking
+    typeset -g _NICEHIST_LAST_EXIT=""
+
     # Register frecent chpwd hook if enabled
     if (( ${NICEHIST[FRECENT_ENABLED]:-1} )); then
         add-zsh-hook chpwd _nicehist_frecent_chpwd
@@ -56,6 +59,10 @@ function _nicehist_precmd() {
 
     _nicehist_debug "precmd: exit=$exit_status duration=${duration_ms}ms cmd=$cmd"
 
+    # Shift exit status for n-gram tracking (previous command's exit)
+    _NICEHIST_PREV_EXIT="$_NICEHIST_LAST_EXIT"
+    _NICEHIST_LAST_EXIT="$exit_status"
+
     # Store command asynchronously
     _nicehist_store_async \
         "$cmd" \
@@ -64,7 +71,8 @@ function _nicehist_precmd() {
         "$duration_ms" \
         "${_NICEHIST_CMD_START_TIME%.*}" \
         "$_NICEHIST_LAST_CMD" \
-        "$_NICEHIST_PREV_CMD"
+        "$_NICEHIST_PREV_CMD" \
+        "$_NICEHIST_PREV_EXIT"
 
     # Update command history for n-grams
     _NICEHIST_PREV_CMD="$_NICEHIST_LAST_CMD"
